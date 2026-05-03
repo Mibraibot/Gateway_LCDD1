@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoRa Spectrum Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-primary: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.5);
+            --danger: #ef4444;
+            --success: #10b981;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 2rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h1::before {
+            content: '';
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background-color: var(--accent-primary);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .status-badge {
+            background-color: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .status-badge .dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr); /* Fix horizontal blowout */
+            gap: 1.5rem;
+            flex-grow: 1;
+            width: 100%;
+        }
+
+        .panel {
+            background-color: var(--panel-bg);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            min-width: 0;
+        }
+
+        .metrics-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .metric-card {
+            background: linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+            padding: 1.25rem;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .metric-title {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+
+        .metric-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+
+        .metric-unit {
+            font-size: 1rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 50vh;
+            width: 100%;
+        }
+
+        .terminal-container {
+            background-color: #09090b;
+            border-radius: 0.75rem;
+            margin-top: 1.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            height: 250px;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+            min-width: 0;
+        }
+
+        .terminal-header {
+            background-color: #18181b;
+            padding: 0.5rem 1rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #a1a1aa;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            border-top-left-radius: 0.75rem;
+            border-top-right-radius: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .terminal-output {
+            padding: 1rem;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            color: #4ade80; /* Hacker green */
+            overflow: auto;
+            flex-grow: 1;
+            white-space: pre;
+            line-height: 1.4;
+        }
+        
+        /* Custom scrollbar for terminal */
+        .terminal-output::-webkit-scrollbar {
+            width: 8px;
+        }
+        .terminal-output::-webkit-scrollbar-track {
+            background: #09090b;
+        }
+        .terminal-output::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 4px;
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>LoRa NRF24 Spectrum Analyzer</h1>
+        <div class="status-badge" id="connection-status">
+            <div class="dot"></div>
+            Receiving Data
+        </div>
+    </header>
+
+    <div class="dashboard-grid">
+        <div class="metrics-container">
+            <div class="metric-card">
+                <div class="metric-title">Transmitter Node</div>
+                <div class="metric-value" id="node-id">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Timestamp (WIB)</div>
+                <div class="metric-value" id="timestamp">-</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Signal Strength (RSSI)</div>
+                <div class="metric-value">
+                    <span id="rssi">0</span>
+                    <span class="metric-unit">dBm</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-title">Signal-to-Noise (SNR)</div>
+                <div class="metric-value">
+                    <span id="snr">0</span>
+                    <span class="metric-unit">dB</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="chart-container">
+                <canvas id="spectrumChart"></canvas>
+            </div>
+        </div>
+
+        <div class="terminal-container">
+            <div class="terminal-header">
+                <span>>_ SERIAL MONITOR (RAW JSON)</span>
+                <button onclick="document.getElementById('terminal-output').innerHTML = ''" style="background: none; border: none; color: #a1a1aa; cursor: pointer; font-size: 0.75rem; text-decoration: underline;">Clear</button>
+            </div>
+            <div class="terminal-output" id="terminal-output"></div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Chart.js
+        const ctx = document.getElementById('spectrumChart').getContext('2d');
+        
+        // Generate X-axis labels (Channels 0 to 124)
+        const labels = Array.from({length: 125}, (_, i) => i);
+        
+        // Initialize empty data
+        const initialData = Array(125).fill(0);
+
+        // Create gradient for bars
+        const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(59, 130, 246, 1)');   // Solid blue top
+        gradient.addColorStop(1, 'rgba(59, 130, 246, 0.1)'); // Transparent blue bottom
+
+        const chartConfig = {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Activity Level',
+                    data: initialData,
+                    backgroundColor: gradient,
+                    borderColor: 'rgba(59, 130, 246, 0.8)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    barPercentage: 0.9,
+                    categoryPercentage: 1.0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: {
+                    duration: 300 // Fast animation for real-time feel
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: function(context) {
+                                return 'Channel: ' + context[0].label;
+                            },
+                            label: function(context) {
+                                return 'Activity: ' + context.parsed.y + ' / 15';
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.05)',
+                            drawBorder: false,
+                        },
+                        ticks: {
+                            color: '#94a3b8',
+                            autoSkip: false, // Menampilkan semua angka tanpa terlewati
+                            maxRotation: 90, // Rotasi label agar muat
+                            minRotation: 90,
+                            font: { size: 10 },
+                            callback: function(value) {
+                                return value; // Hanya angka 0, 1, 2...
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'NRF24L01 Channel (0-124)',
+                            color: '#94a3b8',
+                            font: { size: 14 }
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        max: 15,
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.05)',
+                            drawBorder: false,
+                        },
+                        ticks: {
+                            color: '#94a3b8',
+                            stepSize: 3
+                        },
+                        title: {
+                            display: true,
+                            text: 'Activity Hits (Max 15)',
+                            color: '#94a3b8',
+                            font: { size: 14 }
+                        }
+                    }
+                }
+            }
+        };
+
+        const spectrumChart = new Chart(ctx, chartConfig);
+
+        // Connect to SSE Endpoint
+        const eventSource = new EventSource('/stream');
+        
+        let lastUpdate = Date.now();
+
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            
+            // Update Metrics
+            document.getElementById('node-id').textContent = data.node;
+            document.getElementById('timestamp').textContent = data.timestamp;
+            document.getElementById('rssi').textContent = data.rssi;
+            document.getElementById('snr').textContent = data.snr;
+            
+            // Update Chart
+            spectrumChart.data.datasets[0].data = data.spectrum;
+            spectrumChart.update('none'); // Use 'none' to avoid full re-render flickering, relies on fast updates
+            
+            // Update Terminal
+            const terminal = document.getElementById('terminal-output');
+            
+            // Check if user is scrolled to the bottom BEFORE appending new data
+            const isScrolledToBottom = terminal.scrollHeight - terminal.clientHeight <= terminal.scrollTop + 10;
+
+            // Format JSON and compress the 125-item array into a single line
+            let jsonStr = JSON.stringify(data, null, 2);
+            jsonStr = jsonStr.replace(/\[\s+([\d,\s-]+)\s+\]/g, (match, p1) => {
+                return '[' + p1.replace(/\s+/g, ' ') + ']';
+            });
+
+            terminal.innerHTML += `<span style="color: #a1a1aa;">[${new Date().toLocaleTimeString()}] Packet Received:</span>\n${jsonStr}\n\n`;
+            
+            // Auto scroll to bottom ONLY if the user was already at the bottom
+            if (isScrolledToBottom) {
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            lastUpdate = Date.now();
+        };
+
+        eventSource.onerror = function(err) {
+            console.error("SSE Connection Error:", err);
+            const badge = document.getElementById('connection-status');
+            badge.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+            badge.style.color = 'var(--danger)';
+            badge.style.borderColor = 'rgba(239, 68, 68, 0.2)';
+            badge.innerHTML = '<div class="dot" style="background-color: var(--danger); animation: none;"></div> Disconnected';
+        };
+        
+        // Watchdog to check if data is stale
+        setInterval(() => {
+            if (Date.now() - lastUpdate > 3000) {
+                // No data received for 3 seconds
+                const badge = document.getElementById('connection-status');
+                badge.style.backgroundColor = 'rgba(245, 158, 11, 0.1)';
+                badge.style.color = '#f59e0b';
+                badge.style.borderColor = 'rgba(245, 158, 11, 0.2)';
+                badge.innerHTML = '<div class="dot" style="background-color: #f59e0b; animation: none;"></div> Waiting for Data...';
+            } else {
+                const badge = document.getElementById('connection-status');
+                badge.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
+                badge.style.color = 'var(--success)';
+                badge.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+                badge.innerHTML = '<div class="dot"></div> Receiving Data';
+            }
+        }, 1000);
+
+    </script>
+</body>
+</html>
