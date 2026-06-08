@@ -1,0 +1,540 @@
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
+#include <WiFi.h>
+#include <time.h>
+
+// ----------------------------------------------------------------------------
+// PIN LORA
+// ----------------------------------------------------------------------------
+#define SS    5
+#define RST   14
+#define DIO0  26
+
+// ----------------------------------------------------------------------------
+// PIN SPI
+// ----------------------------------------------------------------------------
+#define SCK   18
+#define MISO  19
+#define MOSI  23
+
+// ----------------------------------------------------------------------------
+// WIFI CONFIG
+// ----------------------------------------------------------------------------
+const char* ssid = "NAMA_WIFI";
+const char* password = "PASSWORD_WIFI";
+
+// ----------------------------------------------------------------------------
+// NTP CONFIG
+// ----------------------------------------------------------------------------
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 7 * 3600; // WIB UTC+7
+const int daylightOffset_sec = 0;
+
+// ============================================================================
+// WIFI CONNECT
+// ============================================================================
+void connectWiFi() {
+
+  Serial.println("Menghubungkan ke WiFi...");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ============================================================================
+// GET UNIX TIMESTAMP FROM NTP
+// ============================================================================
+unsigned long getEpochTime() {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Gagal mendapatkan waktu NTP");
+    return 0;
+  }
+
+  time_t now;
+  time(&now);
+
+  return (unsigned long)now;
+}
+
+// ============================================================================
+// SEND SYNC TO ALL NODES
+// ============================================================================
+void sendSyncToNodes() {
+
+  unsigned long epoch = getEpochTime();
+
+  // --------------------------------------------------------------------------
+  // JSON PAYLOAD
+  // --------------------------------------------------------------------------
+  String payload = "{";
+  payload += "\"type\":\"sync\",";
+  payload += "\"status\":\"ON\",";
+  payload += "\"timestamp\":" + String(epoch);
+  payload += "}";
+
+  Serial.println("\n==============================");
+  Serial.println("Mengirim Timestamp ke Node...");
+  Serial.println(payload);
+  Serial.println("==============================");
+
+  // --------------------------------------------------------------------------
+  // SEND VIA LORA
+  // --------------------------------------------------------------------------
+  LoRa.beginPacket();
+  LoRa.print(payload);
+  LoRa.endPacket();
+
+  Serial.println("Timestamp berhasil dikirim!");
+}
+
+// ============================================================================
+// SETUP
+// ============================================================================
+void setup() {
+
+  Serial.begin(115200);
+  while (!Serial);
+
+  // --------------------------------------------------------------------------
+  // SPI INIT
+  // --------------------------------------------------------------------------
+  SPI.begin(SCK, MISO, MOSI, SS);
+
+  // --------------------------------------------------------------------------
+  // LORA INIT
+  // --------------------------------------------------------------------------
+  LoRa.setPins(SS, RST, DIO0);
+
+  if (!LoRa.begin(433E6)) {
+    Serial.println("LoRa Gateway Gagal!");
+    while (1);
+  }
+
+  // HARUS SAMA DENGAN NODE
+  LoRa.setSpreadingFactor(12);
+  LoRa.setSyncWord(0x34);
+
+  Serial.println("LoRa Gateway Ready");
+
+  // --------------------------------------------------------------------------
+  // WIFI CONNECT
+  // --------------------------------------------------------------------------
+  connectWiFi();
+
+  // --------------------------------------------------------------------------
+  // NTP INIT
+  // --------------------------------------------------------------------------
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  Serial.println("Sinkronisasi waktu NTP...");
+  delay(3000);
+
+  // --------------------------------------------------------------------------
+  // SEND INITIAL SYNC
+  // --------------------------------------------------------------------------
+  sendSyncToNodes();
+
+  Serial.println("\nGateway Siap Menerima Data Node...\n");
+}
+
+// ============================================================================
+// LOOP
+// ============================================================================
+void loop() {
+
+  // --------------------------------------------------------------------------
+  // RECEIVE NODE DATA
+  // --------------------------------------------------------------------------
+  int packetSize = LoRa.parsePacket();
+
+  if (packetSize) {
+
+    String receivedData = "";
+
+    while (LoRa.available()) {
+      receivedData += (char)LoRa.read();
+    }
+
+    // ------------------------------------------------------------------------
+    // JSON OUTPUT
+    // ------------------------------------------------------------------------
+    Serial.println("{");
+    Serial.println("  \"event\": \"data_received\",");
+
+    Serial.print("  \"rssi\": ");
+    Serial.print(LoRa.packetRssi());
+    Serial.println(",");
+
+    Serial.print("  \"snr\": ");
+    Serial.print(LoRa.packetSnr());
+    Serial.println(",");
+
+    Serial.print("  \"payload\": ");
+    Serial.println(receivedData);
+
+    Serial.println("}");
+
+    Serial.println("--------------------------------");
+  }
+}
+
+
+
+// ============================================================================
+// 🛰️ GATEWAY LORA + FIREBASE + WIFI RECOVERY
+// ============================================================================
+// Fungsi Gateway:
+// 1. Sinkronisasi timestamp ke node saat startup
+// 2. Menerima data scanning dari node via LoRa
+// 3. Mengirim data ke Firebase Realtime Database
+// 4. Auto reconnect WiFi jika internet terputus
+// 5. Menyimpan data terbaru ke buffer saat offline
+// ============================================================================
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <time.h>
+
+// ----------------------------------------------------------------------------
+// PIN LORA
+// ----------------------------------------------------------------------------
+#define SS    5
+#define RST   14
+#define DIO0  26
+
+// ----------------------------------------------------------------------------
+// PIN SPI
+// ----------------------------------------------------------------------------
+#define SCK   18
+#define MISO  19
+#define MOSI  23
+
+// ----------------------------------------------------------------------------
+// WIFI CONFIG
+// ----------------------------------------------------------------------------
+const char* ssid = "NAMA_WIFI";
+const char* password = "PASSWORD_WIFI";
+
+// ----------------------------------------------------------------------------
+// FIREBASE CONFIG
+// ----------------------------------------------------------------------------
+const char* firebaseHost =
+"https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com";
+
+// ----------------------------------------------------------------------------
+// NTP CONFIG
+// ----------------------------------------------------------------------------
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 7 * 3600;
+const int daylightOffset_sec = 0;
+
+// ----------------------------------------------------------------------------
+// BUFFER STORAGE
+// ----------------------------------------------------------------------------
+String bufferedPayload = "";
+String bufferedNodeKey = "";
+bool hasBufferedData = false;
+
+// ============================================================================
+// CONNECT WIFI
+// ============================================================================
+void connectWiFi() {
+
+  Serial.println("Menghubungkan ke WiFi...");
+
+  WiFi.begin(ssid, password);
+
+  int retry = 0;
+
+  while (WiFi.status() != WL_CONNECTED && retry < 20) {
+    delay(500);
+    Serial.print(".");
+    retry++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+  } else {
+
+    Serial.println("\nWiFi Gagal Terhubung!");
+  }
+}
+
+// ============================================================================
+// CHECK WIFI RECONNECT
+// ============================================================================
+void checkWiFiConnection() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println("WiFi Terputus! Reconnecting...");
+
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+
+    int retry = 0;
+
+    while (WiFi.status() != WL_CONNECTED && retry < 10) {
+      delay(500);
+      Serial.print(".");
+      retry++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWiFi Reconnected!");
+    } else {
+      Serial.println("\nReconnect Gagal!");
+    }
+  }
+}
+
+// ============================================================================
+// GET EPOCH TIME
+// ============================================================================
+unsigned long getEpochTime() {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Gagal mendapatkan waktu NTP");
+    return 0;
+  }
+
+  time_t now;
+  time(&now);
+
+  return (unsigned long)now;
+}
+
+// ============================================================================
+// SEND SYNC TO NODES
+// ============================================================================
+void sendSyncToNodes() {
+
+  unsigned long epoch = getEpochTime();
+
+  String payload = "{";
+  payload += "\"type\":\"sync\",";
+  payload += "\"status\":\"ON\",";
+  payload += "\"timestamp\":" + String(epoch);
+  payload += "}";
+
+  Serial.println("\nMengirim Timestamp ke Node...");
+  Serial.println(payload);
+
+  LoRa.beginPacket();
+  LoRa.print(payload);
+  LoRa.endPacket();
+
+  Serial.println("Timestamp berhasil dikirim!");
+}
+
+// ============================================================================
+// EXTRACT NODE KEY
+// ============================================================================
+String getNodeKey(String payload) {
+
+  if (payload.indexOf("Node 1") >= 0) return "node1";
+  if (payload.indexOf("Node 2") >= 0) return "node2";
+  if (payload.indexOf("Node 3") >= 0) return "node3";
+
+  return "unknown";
+}
+
+// ============================================================================
+// SEND TO FIREBASE
+// ============================================================================
+bool sendToFirebase(String nodeKey, String payload) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi Offline, data masuk buffer...");
+    return false;
+  }
+
+  HTTPClient http;
+
+  String url = String(firebaseHost) +
+               "/detection_system/" +
+               nodeKey +
+               ".json";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int httpResponseCode = http.PUT(payload);
+
+  if (httpResponseCode > 0) {
+
+    Serial.println("Data berhasil dikirim ke Firebase");
+    Serial.println("HTTP Response: " + String(httpResponseCode));
+
+    http.end();
+    return true;
+
+  } else {
+
+    Serial.println("Gagal kirim Firebase");
+    Serial.println(http.errorToString(httpResponseCode));
+
+    http.end();
+    return false;
+  }
+}
+
+// ============================================================================
+// SETUP
+// ============================================================================
+void setup() {
+
+  Serial.begin(115200);
+  while (!Serial);
+
+  // --------------------------------------------------------------------------
+  // SPI INIT
+  // --------------------------------------------------------------------------
+  SPI.begin(SCK, MISO, MOSI, SS);
+
+  // --------------------------------------------------------------------------
+  // LORA INIT
+  // --------------------------------------------------------------------------
+  LoRa.setPins(SS, RST, DIO0);
+
+  if (!LoRa.begin(433E6)) {
+
+    Serial.println("LoRa Gateway Gagal!");
+    while (1);
+  }
+
+  LoRa.setSpreadingFactor(12);
+  LoRa.setSyncWord(0x34);
+
+  Serial.println("LoRa Gateway Ready");
+
+  // --------------------------------------------------------------------------
+  // WIFI CONNECT
+  // --------------------------------------------------------------------------
+  connectWiFi();
+
+  // --------------------------------------------------------------------------
+  // NTP INIT
+  // --------------------------------------------------------------------------
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  Serial.println("Sinkronisasi waktu NTP...");
+  delay(3000);
+
+  // --------------------------------------------------------------------------
+  // SEND INITIAL SYNC
+  // --------------------------------------------------------------------------
+  sendSyncToNodes();
+
+  Serial.println("\nGateway Siap Menerima Data Node...\n");
+}
+
+// ============================================================================
+// LOOP
+// ============================================================================
+void loop() {
+
+  // --------------------------------------------------------------------------
+  // CHECK WIFI
+  // --------------------------------------------------------------------------
+  checkWiFiConnection();
+
+  // --------------------------------------------------------------------------
+  // RESEND BUFFER IF WIFI RECOVERED
+  // --------------------------------------------------------------------------
+  if (hasBufferedData && WiFi.status() == WL_CONNECTED) {
+
+    Serial.println("Mengirim ulang data buffer...");
+
+    bool success = sendToFirebase(bufferedNodeKey, bufferedPayload);
+
+    if (success) {
+
+      hasBufferedData = false;
+      bufferedPayload = "";
+      bufferedNodeKey = "";
+
+      Serial.println("Buffer berhasil dikirim!");
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // RECEIVE LORA DATA
+  // --------------------------------------------------------------------------
+  int packetSize = LoRa.parsePacket();
+
+  if (packetSize) {
+
+    String receivedData = "";
+
+    while (LoRa.available()) {
+      receivedData += (char)LoRa.read();
+    }
+
+    // ------------------------------------------------------------------------
+    // DISPLAY JSON
+    // ------------------------------------------------------------------------
+    Serial.println("{");
+    Serial.println("  \"event\": \"data_received\",");
+
+    Serial.print("  \"rssi\": ");
+    Serial.print(LoRa.packetRssi());
+    Serial.println(",");
+
+    Serial.print("  \"snr\": ");
+    Serial.print(LoRa.packetSnr());
+    Serial.println(",");
+
+    Serial.print("  \"payload\": ");
+    Serial.println(receivedData);
+
+    Serial.println("}");
+
+    // ------------------------------------------------------------------------
+    // EXTRACT NODE KEY
+    // ------------------------------------------------------------------------
+    String nodeKey = getNodeKey(receivedData);
+
+    // ------------------------------------------------------------------------
+    // SEND FIREBASE
+    // ------------------------------------------------------------------------
+    bool success = sendToFirebase(nodeKey, receivedData);
+
+    // ------------------------------------------------------------------------
+    // SAVE TO BUFFER IF FAILED
+    // ------------------------------------------------------------------------
+    if (!success) {
+
+      bufferedPayload = receivedData;
+      bufferedNodeKey = nodeKey;
+      hasBufferedData = true;
+
+      Serial.println("Data disimpan ke buffer sementara");
+    }
+
+    Serial.println("--------------------------------");
+  }
+}

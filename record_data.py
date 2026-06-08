@@ -7,7 +7,7 @@ import os
 
 # Konfigurasi waktu rekam (dalam detik). 120 detik = 2 menit.
 # Konfigurasi waktu rekam: 30 menit
-RECORDING_DURATION = 1800
+RECORDING_DURATION = 180
 
 def auto_detect_port():
     """Auto-detect port ESP32."""
@@ -19,8 +19,31 @@ def auto_detect_port():
         return ports[0].device
     return None
 
+
 def main():
-    print("Mencari port Serial Gateway...")
+    print("==========================================")
+    print("Pilih Kondisi Perekaman Data:")
+    print("1. WiFi Saja")
+    print("2. WiFi + Bluetooth")
+    print("3. WiFi + Bluetooth + Drone")
+    print("4. Custom (Ketik Sendiri)")
+    pilihan = input("Masukkan pilihan (1/2/3/4): ").strip()
+    
+    label_kondisi = "dataset"
+    if pilihan == '1':
+        label_kondisi = "wifi"
+    elif pilihan == '2':
+        label_kondisi = "wifi_bt"
+    elif pilihan == '3':
+        label_kondisi = "wifi_bt_drone"
+    elif pilihan == '4':
+        label_kondisi = input("Masukkan nama kondisi (tanpa spasi): ").strip().replace(" ", "_")
+    else:
+        label_kondisi = "mixed"
+    
+    print(f"\n[!] Label perekaman di-set ke: '{label_kondisi}'")
+    
+    print("\nMencari port Serial Gateway...")
     port_name = auto_detect_port()
     if not port_name:
         print("Error: Port Serial ESP32 tidak terdeteksi. Pastikan alat terhubung.")
@@ -57,14 +80,19 @@ def main():
                 if "--------------------------------" in line:
                     if buffer.strip():
                         try:
-                            # Coba parsing JSON dari buffer
-                            data = json.loads(buffer)
-                            if "event" in data and data["event"] == "data_received":
-                                # Tambahkan timestamp komputer saat paket ini diterima
-                                data["captured_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                
-                                collected_data.append(data)
-                                print(f"[{data['captured_at']}] Paket berhasil direkam. (Total: {len(collected_data)} paket) | Sisa waktu: {int(remaining)}s")
+                            # Cari kurawal buka pertama dan kurawal tutup terakhir untuk mengabaikan log Serial lainnya
+                            start_idx = buffer.find('{')
+                            end_idx = buffer.rfind('}')
+                            if start_idx != -1 and end_idx != -1:
+                                json_str = buffer[start_idx:end_idx+1]
+                                data = json.loads(json_str)
+                                if "event" in data and data["event"] == "data_received":
+                                    # Tambahkan timestamp komputer saat paket ini diterima
+                                    data["captured_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    data["label"] = label_kondisi
+                                    
+                                    collected_data.append(data)
+                                    print(f"[{data['captured_at']}] Paket berhasil direkam. (Total: {len(collected_data)} paket) | Sisa waktu: {int(remaining)}s")
                         except json.JSONDecodeError:
                             pass
                     
@@ -86,7 +114,7 @@ def main():
     if len(collected_data) > 0:
         # Format nama file dengan tanggal & jam, misalnya: dataset_lora_20260502_195500.json
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"dataset_lora_{timestamp_str}.json"
+        filename = f"dataset_{label_kondisi}_{timestamp_str}.json"
         
         # Simpan ke file JSON
         with open(filename, "w", encoding="utf-8") as f:
