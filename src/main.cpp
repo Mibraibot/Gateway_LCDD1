@@ -11,8 +11,8 @@
 #include <ArduinoJson.h>
 
 // --- KREDENSIAL WIFI ---
-const char *ssid = "plutan";
-const char *password = "plutan56";
+const char *ssid = "Byu";
+const char *password = "123456789";
 
 // --- KONFIGURASI NTP (WIB = UTC+7) ---
 const char *ntpServer = "pool.ntp.org";
