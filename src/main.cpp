@@ -11,8 +11,8 @@
 #include <ArduinoJson.h>
 
 // --- KREDENSIAL WIFI ---
-const char *ssid = "plutan";
-const char *password = "plutan56";
+const char *ssid = "Byu";
+const char *password = "123456789";
 
 // --- KONFIGURASI NTP (WIB = UTC+7) ---
 const char *ntpServer = "pool.ntp.org";
@@ -300,6 +300,7 @@ void setup() {
     delay(500);
 
     // Menghubungkan ke WiFi dengan Animasi
+    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Turunkan daya TX WiFi untuk mencegah restart/brownout
     WiFi.begin(ssid, password);
     int animCounter = 0;
     while (WiFi.status() != WL_CONNECTED) {
@@ -368,8 +369,7 @@ void setup() {
   LoRa.setSyncWord(0x34);
 
   // TURUNKAN DAYA LORA TX UNTUK MENCEGAH BROWNOUT/RESET RESET KARENA ARUS DROP
-  LoRa.setTxPower(14); // Default biasanya 17 atau 20 (terlalu tinggi untuk
-                       // beberapa port USB)
+  LoRa.setTxPower(10); // Diturunkan lebih ekstrim dari 14 ke 10 agar lebih stabil di daya rendah
 
   Serial.println("Gateway LoRa Siap Menerima...");
 
