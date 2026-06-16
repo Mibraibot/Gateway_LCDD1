@@ -51,7 +51,7 @@ bool loraActive = false;
 int lastFirebaseResponseCode = 0;
 
 // Variabel Polling Gateway
-int pollingNode = 1;
+int pollingNode = 3;
 unsigned long pollStartTime = 0;
 const unsigned long POLL_TIMEOUT = 3000;
 bool waitingForReply = false;
@@ -410,8 +410,7 @@ void loop() {
       // Tunggu balasan
       if (millis() - pollStartTime > POLL_TIMEOUT) {
         Serial.println(">>> Timeout! Node " + String(pollingNode) + " tidak merespon.");
-        pollingNode++;
-        if (pollingNode > 3) pollingNode = 1;
+        pollingNode = 3; // Hanya Node 3
         waitingForReply = false;
       } else {
         int packetSize = LoRa.parsePacket();
@@ -468,8 +467,7 @@ void loop() {
           if (nodeName == expectedNode) {
             Serial.println("-> Balasan diterima dari " + expectedNode);
             sendToFirebaseSingle(expectedNode, dataHex, capturedAt, timeStr, lastLoraRssi, LoRa.packetSnr());
-            pollingNode++;
-            if (pollingNode > 3) pollingNode = 1;
+            pollingNode = 3; // Hanya Node 3
             waitingForReply = false;
           }
         }
@@ -551,7 +549,7 @@ void loop() {
       } else {
         currentMode = MODE_LISTENING;
         Serial.println("Mode: LISTENING");
-        pollingNode = 1; waitingForReply = false; // Reset polling
+        pollingNode = 3; waitingForReply = false; // Reset polling
         Serial.println("Mulai Polling Node...");
       }
       updateOLEDDisplay(lastLoraRssi, lastLoraMsg);
