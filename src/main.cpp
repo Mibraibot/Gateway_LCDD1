@@ -1,6 +1,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <LoRa.h>
 #include <SPI.h>
@@ -8,11 +9,10 @@
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <time.h>
-#include <ArduinoJson.h>
 
 // --- KREDENSIAL WIFI ---
-const char *ssid = "Byu";
-const char *password = "123456789";
+const char *ssid = "plutan";
+const char *password = "plutan56";
 
 // --- KONFIGURASI NTP (WIB = UTC+7) ---
 const char *ntpServer = "pool.ntp.org";
@@ -51,7 +51,7 @@ bool loraActive = false;
 int lastFirebaseResponseCode = 0;
 
 // Variabel Polling Gateway
-int pollingNode = 3;
+int pollingNode = 1;
 unsigned long pollStartTime = 0;
 const unsigned long POLL_TIMEOUT = 3000;
 bool waitingForReply = false;
@@ -71,36 +71,41 @@ void showGatewayInfoScreen() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  
+
   // Header
   display.setCursor(0, 0);
   display.println("   [ GATEWAY INFO ]");
   display.println("---------------------");
-  
+
   // Status WiFi
   display.print("WiFi: ");
   if (WiFi.status() == WL_CONNECTED) {
     display.println("CONNECTED");
-    display.print("SSID: "); display.println(ssid);
-    display.print("RSSI: "); display.print(WiFi.RSSI()); display.println(" dBm");
+    display.print("SSID: ");
+    display.println(ssid);
+    display.print("RSSI: ");
+    display.print(WiFi.RSSI());
+    display.println(" dBm");
   } else {
     display.println("DISCONNECTED");
   }
-  
+
   // Status Firebase
   display.print("FB  : ");
   if (WiFi.status() == WL_CONNECTED) {
     if (lastFirebaseResponseCode == 200 || lastFirebaseResponseCode == 201) {
       display.println("CONNECTED (OK)");
     } else if (lastFirebaseResponseCode != 0) {
-      display.print("ERR (code: "); display.print(lastFirebaseResponseCode); display.println(")");
+      display.print("ERR (code: ");
+      display.print(lastFirebaseResponseCode);
+      display.println(")");
     } else {
       display.println("READY (Idle)");
     }
   } else {
     display.println("NO NETWORK");
   }
-  
+
   // Status LoRa
   display.print("LoRa: ");
   if (loraActive) {
@@ -108,7 +113,7 @@ void showGatewayInfoScreen() {
   } else {
     display.println("FAILED / ERROR");
   }
-  
+
   display.display();
 }
 
@@ -120,23 +125,28 @@ void broadcastTimeSync() {
     return;
   }
 
+  // Fungsi time(nullptr) pada ESP32 selalu mengembalikan epoch UTC.
+  // Karena Node mencetak waktu tepat dari epoch yang diterima tanpa menambahkan zona waktu,
+  // kita tambahkan offset WIB (+7 jam) di sini sebelum epoch tersebut di-broadcast.
+  time_t localEpoch = now + gmtOffset_sec;
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.println("Broadcasting Time...");
   display.print("Epoch: ");
-  display.println(now);
+  display.println(localEpoch);
   display.display();
 
   // Mengirim data epoch timestamp dalam format JSON via LoRa
   LoRa.beginPacket();
   LoRa.print("{\"type\":\"sync\",\"time\":");
-  LoRa.print(now);
+  LoRa.print(localEpoch);
   LoRa.print("}");
   LoRa.endPacket(); // Di sinilah transmisi fisik terjadi
 
   Serial.print("Waktu sinkronisasi terkirim ke Node: ");
-  Serial.println(now);
+  Serial.println(localEpoch);
   delay(1500);
 }
 
@@ -160,7 +170,8 @@ void broadcastCommand(String cmd) {
 }
 
 // Fungsi untuk mengirim data tunggal Node ke Firebase
-void sendToFirebaseSingle(String nodeKey, String data_hex, String timestamp_wib, String captured_at, int rssi, float snr) {
+void sendToFirebaseSingle(String nodeKey, String data_hex, String timestamp_wib,
+                          String captured_at, int rssi, float snr) {
   if (WiFi.status() == WL_CONNECTED) {
     display.clearDisplay();
     display.setTextSize(1);
@@ -193,7 +204,7 @@ void sendToFirebaseSingle(String nodeKey, String data_hex, String timestamp_wib,
     Serial.print("Mengirim data ");
     Serial.print(nodeKey);
     Serial.println(" ke Firebase...");
-    int httpResponseCode = http.PATCH(jsonPayload); 
+    int httpResponseCode = http.PATCH(jsonPayload);
     lastFirebaseResponseCode = httpResponseCode;
 
     if (httpResponseCode > 0) {
@@ -300,7 +311,8 @@ void setup() {
     delay(500);
 
     // Menghubungkan ke WiFi dengan Animasi
-    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Turunkan daya TX WiFi untuk mencegah restart/brownout
+    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Turunkan daya TX WiFi untuk mencegah
+                                        // restart/brownout
     WiFi.begin(ssid, password);
     int animCounter = 0;
     while (WiFi.status() != WL_CONNECTED) {
@@ -365,11 +377,13 @@ void setup() {
   loraActive = true;
 
   // Konfigurasi harus sama dengan Node 1
-  LoRa.setSpreadingFactor(9); // Akselerasi: Diubah dari SF12 menjadi SF9 untuk kecepatan transmisi ekstra
+  LoRa.setSpreadingFactor(9); // Akselerasi: Diubah dari SF12 menjadi SF9 untuk
+                              // kecepatan transmisi ekstra
   LoRa.setSyncWord(0x34);
 
   // TURUNKAN DAYA LORA TX UNTUK MENCEGAH BROWNOUT/RESET RESET KARENA ARUS DROP
-  LoRa.setTxPower(10); // Diturunkan lebih ekstrim dari 14 ke 10 agar lebih stabil di daya rendah
+  LoRa.setTxPower(10); // Diturunkan lebih ekstrim dari 14 ke 10 agar lebih
+                       // stabil di daya rendah
 
   Serial.println("Gateway LoRa Siap Menerima...");
 
@@ -390,7 +404,7 @@ void loop() {
   if (currentMode == MODE_LISTENING) {
     if (!waitingForReply) {
       String cmd = "POLL_Node" + String(pollingNode);
-      
+
       display.clearDisplay();
       display.setTextSize(1);
       display.setCursor(0, 0);
@@ -409,8 +423,11 @@ void loop() {
     } else {
       // Tunggu balasan
       if (millis() - pollStartTime > POLL_TIMEOUT) {
-        Serial.println(">>> Timeout! Node " + String(pollingNode) + " tidak merespon.");
-        pollingNode = 3; // Hanya Node 3
+        Serial.println(">>> Timeout! Node " + String(pollingNode) +
+                       " tidak merespon.");
+        pollingNode++;
+        if (pollingNode > 3)
+          pollingNode = 1;
         waitingForReply = false;
       } else {
         int packetSize = LoRa.parsePacket();
@@ -452,22 +469,28 @@ void loop() {
 
           if (!error) {
             nodeName = doc["node"] | "";
-            nodeName.replace(" ", ""); 
+            nodeName.replace(" ", "");
             dataHex = doc["data_hex"] | receivedData;
-            capturedAt = doc["timestamp_wib"] | timeStr; 
+            capturedAt = doc["timestamp_wib"] | timeStr;
           } else {
             dataHex = receivedData;
             capturedAt = timeStr;
-            if (receivedData.indexOf("Node1") >= 0) nodeName = "Node1";
-            else if (receivedData.indexOf("Node2") >= 0) nodeName = "Node2";
-            else if (receivedData.indexOf("Node3") >= 0) nodeName = "Node3";
+            if (receivedData.indexOf("Node1") >= 0)
+              nodeName = "Node1";
+            else if (receivedData.indexOf("Node2") >= 0)
+              nodeName = "Node2";
+            else if (receivedData.indexOf("Node3") >= 0)
+              nodeName = "Node3";
           }
 
           String expectedNode = "Node" + String(pollingNode);
           if (nodeName == expectedNode) {
             Serial.println("-> Balasan diterima dari " + expectedNode);
-            sendToFirebaseSingle(expectedNode, dataHex, capturedAt, timeStr, lastLoraRssi, LoRa.packetSnr());
-            pollingNode = 3; // Hanya Node 3
+            sendToFirebaseSingle(expectedNode, dataHex, capturedAt, timeStr,
+                                 lastLoraRssi, LoRa.packetSnr());
+            pollingNode++;
+            if (pollingNode > 3)
+              pollingNode = 1;
             waitingForReply = false;
           }
         }
@@ -475,7 +498,8 @@ void loop() {
     }
   }
 
-  // Update jam digital di OLED setiap 1 detik (jika tidak sedang menampilkan layar info)
+  // Update jam digital di OLED setiap 1 detik (jika tidak sedang menampilkan
+  // layar info)
   if (millis() - lastTimeUpdate >= 1000) {
     lastTimeUpdate = millis();
     if (!showingInfoScreen) {
@@ -520,7 +544,8 @@ void loop() {
   if (digitalRead(BTN2) == LOW) {
     unsigned long now_ms = millis();
     if (now_ms - btn2PressTime > 250) { // Debounce tombol
-      if (now_ms - btn2PressTime < 450) { // Rentang waktu ketukan ganda (double-click)
+      if (now_ms - btn2PressTime <
+          450) { // Rentang waktu ketukan ganda (double-click)
         // Double Click terdeteksi!
         btn2PendingSingleClick = false;
         showingInfoScreen = true;
@@ -543,18 +568,20 @@ void loop() {
         currentMode = MODE_STANDBY;
         Serial.println("Mode: STANDBY");
         Serial.println("Berhenti Polling.");
-        
+
         // Reset sinkronisasi agar bersih saat mulai listen lagi
-        
+
       } else {
         currentMode = MODE_LISTENING;
         Serial.println("Mode: LISTENING");
-        pollingNode = 3; waitingForReply = false; // Reset polling
+        pollingNode = 1;
+        waitingForReply = false; // Reset polling
         Serial.println("Mulai Polling Node...");
       }
       updateOLEDDisplay(lastLoraRssi, lastLoraMsg);
     } else {
-      // Jika info screen sedang aktif, menekan tombol sekali akan menutup info screen lebih cepat
+      // Jika info screen sedang aktif, menekan tombol sekali akan menutup info
+      // screen lebih cepat
       showingInfoScreen = false;
       updateOLEDDisplay(lastLoraRssi, lastLoraMsg);
     }
