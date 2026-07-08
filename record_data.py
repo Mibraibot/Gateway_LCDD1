@@ -87,12 +87,15 @@ def main():
                                 json_str = buffer[start_idx:end_idx+1]
                                 data = json.loads(json_str)
                                 if "event" in data and data["event"] == "data_received":
-                                    # Tambahkan timestamp komputer saat paket ini diterima
-                                    data["captured_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    data["label"] = label_kondisi
-                                    
-                                    collected_data.append(data)
-                                    print(f"[{data['captured_at']}] Paket berhasil direkam. (Total: {len(collected_data)} paket) | Sisa waktu: {int(remaining)}s")
+                                    # Filter: HANYA simpan jika datanya berasal dari Node 3
+                                    node_name = data.get("payload", {}).get("node", "").replace(" ", "")
+                                    if node_name == "Node3":
+                                        # Tambahkan timestamp komputer saat paket ini diterima
+                                        data["captured_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        data["label"] = label_kondisi
+                                        
+                                        collected_data.append(data)
+                                        print(f"[{data['captured_at']}] Paket Node 3 berhasil direkam. (Total: {len(collected_data)} paket) | Sisa waktu: {int(remaining)}s")
                         except json.JSONDecodeError:
                             pass
                     

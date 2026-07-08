@@ -170,53 +170,12 @@ void broadcastCommand(String cmd) {
 }
 
 // Fungsi untuk mengirim data tunggal Node ke Firebase
-void sendToFirebaseSingle(String nodeKey, String data_hex, String timestamp_wib, String captured_at, int rssi, float snr) {
-  if (WiFi.status() == WL_CONNECTED) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(15, 25);
-    display.println("Sending data");
-    display.setCursor(15, 40);
-    display.println("To Firebase...");
-    display.display();
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    String url = String(firebaseDatabaseUrl) + "/detection_system.json";
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/json");
-
-    JsonDocument doc;
-    JsonObject nodeObj = doc[nodeKey].to<JsonObject>();
-    nodeObj["data_hex"] = "RAW_" + data_hex;
-    nodeObj["captured_at"] = captured_at;
-    nodeObj["timestap_wib"] = timestamp_wib;
-    nodeObj["node"] = nodeKey;
-    nodeObj["rssi"] = rssi;
-    nodeObj["snr"] = snr;
-
-    String jsonPayload;
-    serializeJson(doc, jsonPayload);
-
-    Serial.print("Mengirim data ");
-    Serial.print(nodeKey);
-    Serial.println(" ke Firebase...");
-    int httpResponseCode = http.PATCH(jsonPayload); 
-    lastFirebaseResponseCode = httpResponseCode;
-
-    if (httpResponseCode > 0) {
-      Serial.print("Firebase Response Code: ");
-      Serial.println(httpResponseCode);
-    } else {
-      Serial.print("Error saat kirim ke Firebase: ");
-      Serial.println(httpResponseCode);
-    }
-    http.end();
-  } else {
-    Serial.println("Koneksi WiFi Terputus, Gagal Kirim ke Firebase.");
-  }
+void sendToFirebaseSingle(String nodeKey, String data_hex, String timestamp_wib,
+                          String captured_at, int rssi, float snr) {
+  // Mode Drone Only: Tidak melakukan pengiriman ke Firebase
+  Serial.print("Data diterima dari ");
+  Serial.print(nodeKey);
+  Serial.println(" (Firebase diabaikan karena WiFi OFF).");
 }
 
 // Fungsi untuk memperbarui tampilan OLED dengan waktu dan status terkini
@@ -309,53 +268,25 @@ void setup() {
     }
     delay(500);
 
-    // Menghubungkan ke WiFi dengan Animasi
-    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Turunkan daya TX WiFi untuk mencegah restart/brownout
-    WiFi.begin(ssid, password);
-    int animCounter = 0;
-    while (WiFi.status() != WL_CONNECTED) {
-      display.clearDisplay();
-      display.setTextSize(1);
-      display.setCursor(0, 5);
-      display.println("Connecting to wifi");
-      display.print("SSID: ");
-      display.println(ssid);
+    // Mematikan WiFi sepenuhnya agar tidak ada sinyal (Mode Drone Only)
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
 
-      // Animasi titik-titik berjalan
-      display.setCursor(0, 35);
-      for (int i = 0; i <= animCounter; i++) {
-        display.print(".");
-      }
-      display.display();
+    // Set waktu manual (Epoch UTC) karena tidak ada koneksi WiFi/NTP
+    // Contoh 1783062000 (sekitar awal Juli 2026), silakan ubah bila perlu
+    struct timeval tv;
+    tv.tv_sec = 1783062000;
+    tv.tv_usec = 0;
+    settimeofday(&tv, NULL);
 
-      animCounter = (animCounter + 1) % 6;
-      delay(500);
-    }
+    Serial.println("WiFi dinonaktifkan. Waktu diset manual.");
 
-    // Konfigurasi NTP Time Sync
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-    // Tunggu sampai waktu benar-benar sinkron (maksimal 10 detik)
-    Serial.println("Menunggu sinkronisasi waktu dari NTP...");
-    struct tm timeinfo;
-    int retry = 0;
-    while (!getLocalTime(&timeinfo) && retry < 20) {
-      delay(500);
-      retry++;
-    }
-
-    // Berhasil terhubung ke WiFi
+    // Tampilan Berhasil
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println("WiFi Connected!");
+    display.println("Gateway Ready!");
     display.println("---------------------");
-    display.print("SSID: ");
-    display.println(ssid);
-    display.print("RSSI: ");
-    display.print(WiFi.RSSI());
-    display.println(" dBm");
-    display.print("IP  : ");
-    display.println(WiFi.localIP());
+    display.println("WiFi: OFF (Drone Only)");
     display.display();
     delay(3000);
   }
@@ -507,9 +438,9 @@ void loop() {
     updateOLEDDisplay(lastLoraRssi, lastLoraMsg);
   }
 
-  // BUTTON 1 (Pin 15): Paksa Sinkronisasi Ulang NTP & Broadcast Waktu
+  // BUTTON 1 (Pin 15): Paksa Broadcast Waktu (Manual)
   if (digitalRead(BTN1) == LOW) {
-    Serial.println("Tombol 1 Ditekan: Force NTP Sync & Broadcast!");
+    Serial.println("Tombol 1 Ditekan: Force Broadcast Waktu!");
 
     // Tampilkan status sinkronisasi di layar OLED
     display.clearDisplay();
@@ -518,8 +449,7 @@ void loop() {
     display.println("Forcing Sync...");
     display.display();
 
-    // Tarik ulang waktu dari server NTP
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    // Waktu sudah diset manual, tidak perlu tarik dari NTP
     delay(1000);
 
     // Kirim waktu via LoRa
