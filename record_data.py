@@ -7,7 +7,7 @@ import os
 
 # Konfigurasi waktu rekam (dalam detik). 120 detik = 2 menit.
 # Konfigurasi waktu rekam: 30 menit
-RECORDING_DURATION = 180
+RECORDING_DURATION = 600
 
 def auto_detect_port():
     """Auto-detect port ESP32."""
