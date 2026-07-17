@@ -4,121 +4,275 @@ import time
 import re
 import serial
 import serial.tools.list_ports
-import math
+import statistics
+import urllib.request
 
-# Global state to store the latest parsed data
-latest_data = {
-    "rssi": 0,
-    "snr": 0,
-    "timestamp": "-",
-    "node": "-",
-    "spectrum": [0] * 125
-}
+FIREBASE_URL = "https://lowcostdronedetect-default-rtdb.asia-southeast1.firebasedatabase.app"
 
-# Time-series prediction thresholds and window
-THRESHOLD_BURST = 6.0
-THRESHOLD_ENTROPY = 2.24
-THRESHOLD_ACTIVE = 20.30
+# ==============================================================
+# CATATAN SINKRONISASI DENGAN WEBSITE (lowcostdrone dashboard)
+# --------------------------------------------------------------
+# app.py sekarang SATU-SATUNYA penulis ke Firebase:
+#
+# 1) detection_system/{node1|node2|node3}   <- dibaca website
+#    - data mentah: data_hex, rssi, snr, timestamp_wib, captured_at
+#    - hasil deteksi: prediction_id (0=AMAN, 1=DRONE),
+#      prediction_label, prediction_time
+#
+# 2) Timeseries/{Node1|Node2|Node3}
+#    - prediction: "Drone Terdeteksi" / "Aman"
+#    - timestamp : "YYYY-MM-DD HH:MM:SS"
+# ==============================================================
+
+def firebase_patch(path, data):
+    url = f"{FIREBASE_URL}/{path}.json"
+    try:
+        req = urllib.request.Request(url, method="PATCH")
+        req.add_header('Content-Type', 'application/json')
+        jsondata = json.dumps(data).encode('utf-8')
+        req.add_header('Content-Length', len(jsondata))
+        urllib.request.urlopen(req, jsondata, timeout=4)
+        return True
+    except Exception as e:
+        print(f"-> Gagal PATCH {path}: {e}")
+        return False
+
+def send_raw_to_firebase(node_key, data_hex, timestamp_wib, rssi, snr):
+    """Kirim data mentah tiap frame -> kartu node & hex viewer di web hidup."""
+    ok = firebase_patch(f"detection_system/{node_key}", {
+        "node": node_key,
+        "data_hex": data_hex,
+        "timestamp_wib": timestamp_wib,
+        "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "rssi": rssi,
+        "snr": snr,
+    })
+    if ok:
+        print(f"-> Raw frame {node_key} -> detection_system (rssi={rssi}, snr={snr})")
+
+def send_prediction_to_firebase(node_id, node_key, is_drone):
+    """Kirim hasil deteksi ke dua path: web (detection_system) + arsip (Timeseries)."""
+    pred_id = 1 if is_drone else 0
+    label = "DRONE TERDETEKSI" if is_drone else "AMAN"
+
+    firebase_patch(f"detection_system/{node_key}", {
+        "prediction_id": pred_id,
+        "prediction_label": label,
+        "prediction_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+    firebase_patch(f"Timeseries/{node_id}", {
+        "prediction": "Drone Terdeteksi" if is_drone else "Aman",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    print(f"-> Prediksi {node_key} terkirim (id={pred_id}, {label})")
+
+# ==============================================================
+# KONFIGURASI DETEKSI ADAPTIF (Z-SCORE)
+# --------------------------------------------------------------
 WINDOW_SIZE = 5
-data_windows = {} # Menggunakan dictionary agar tidak tercampur antar Node
+STRIDE = 2
+CALIB_SAMPLES = 20
 
-def get_spatial_entropy(channels):
-    ones = sum(channels)
-    zeros = len(channels) - ones
-    if not channels: return 0.0
-    p1 = ones / len(channels)
-    p0 = zeros / len(channels)
-    ent = 0.0
-    if p1 > 0: ent -= p1 * math.log2(p1)
-    if p0 > 0: ent -= p0 * math.log2(p0)
-    return ent
+# Aturan Empiris
+# K_FACTOR: Pengali standar deviasi. 3.0 berarti mentoleransi 
+# fluktuasi noise hingga 99.7% dari variansi normal lingkungan.
+K_FACTOR = 3.0
 
-def get_burst_count(channels):
+# MIN_STDEV: Pengaman batas bawah agar threshold tidak terjepit ke 0
+# jika lingkungan kalibrasi terlalu sepi/statis.
+MIN_STDEV_BURST = 0.5
+MIN_STDEV_ACTIVE = 1.0
+# ==============================================================
+
+LOG_CSV = True
+CSV_FILE = "fitur_log.csv"
+
+data_windows = {}
+stride_counter = {}
+calib_pool = {}
+frozen = {}
+
+def get_burst_count(bits):
+    """Jumlah grup kanal aktif kontigu (transisi 0->1) pada vektor biner."""
     count = 0
-    in_burst = False
-    for val in channels:
-        if val >= 1 and not in_burst:
-            in_burst = True
+    prev = 0
+    for b in bits:
+        if b == 1 and prev == 0:
             count += 1
-        elif val == 0 and in_burst:
-            in_burst = False
+        prev = b
     return count
 
+def hex_to_bits(hex_str):
+    """Binarisasi: kanal dengan nilai hex >= 1 dianggap aktif."""
+    bits = []
+    for char in hex_str:
+        try:
+            bits.append(1 if int(char, 16) >= 1 else 0)
+        except ValueError:
+            bits.append(0)
+    return bits
+
 def auto_detect_port():
-    """Auto-detect the ESP32 serial port."""
     ports = serial.tools.list_ports.comports()
     for port in ports:
-        # Typical keywords for ESP32/Arduino USB-to-Serial chips
-        if "usbserial" in port.device.lower() or "usbmodem" in port.device.lower() or "ttyusb" in port.device.lower() or "ttyacm" in port.device.lower():
+        d = port.device.lower()
+        if "usbserial" in d or "usbmodem" in d or "ttyusb" in d or "ttyacm" in d:
             return port.device
-    
-    # Fallback to the first available port if no explicit match
     if ports:
         return ports[0].device
     return None
 
+def log_csv(node_id, burst_mean, act_mean, base_b, base_a, pred, fase):
+    if not LOG_CSV:
+        return
+    try:
+        new_file = not os.path.exists(CSV_FILE)
+        with open(CSV_FILE, "a", encoding="utf-8") as f:
+            if new_file:
+                f.write("timestamp,node,burst_count_mean,active_ch_mean,baseline_burst,baseline_active,prediksi,fase\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{node_id},{burst_mean:.3f},{act_mean:.3f},{base_b:.3f},{base_a:.3f},{pred},{fase}\n")
+    except Exception as e:
+        print(f"-> Gagal menulis CSV: {e}")
+
 def read_from_port(ser):
-    """Background thread to read data from the serial port."""
-    global data_windows
-    
+    global data_windows, stride_counter, calib_pool, frozen
+
     current_node = "Unknown"
-    print("Mendengarkan data spektrum... (Menunggu 10 data window per Node)")
+    current_rssi = 0
+    current_snr = 0.0
+    current_ts_wib = "00:00:00"
+
+    print(f"FASE 1: KALIBRASI DINAMIS - {CALIB_SAMPLES} frame pertama per node, pastikan TANPA drone!")
+    print(f"FASE 2: DETEKSI ADAPTIF berjalan (Window={WINDOW_SIZE}, Stride={STRIDE}).")
+    print("Baseline & Threshold Adaptif TIDAK berubah sampai program di-restart (SOP lokasi baru = restart).")
+
     while True:
         try:
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8', errors='ignore').strip()
-                
-                # Tangkap info node (muncul sebelum data_hex)
+
+                rssi_match = re.search(r'"rssi"\s*:\s*(-?\d+)', line)
+                if rssi_match and '"data_hex"' not in line:
+                    current_rssi = int(rssi_match.group(1))
+
+                snr_match = re.search(r'"snr"\s*:\s*(-?\d+\.?\d*)', line)
+                if snr_match and '"data_hex"' not in line:
+                    current_snr = float(snr_match.group(1))
+
                 node_match = re.search(r'"node"\s*:\s*"([^"]+)"', line)
                 if node_match:
                     current_node = node_match.group(1)
-                
-                # Kita abaikan debug log yang merusak JSON, langsung ekstrak data_hex pakai Regex!
+
+                ts_match = re.search(r'"timestamp_wib"\s*:\s*"([^"]+)"', line)
+                if ts_match:
+                    current_ts_wib = ts_match.group(1)
+
                 match = re.search(r'"data_hex"\s*:\s*"([0-9a-fA-F]+)"', line)
                 if match:
                     hex_str = match.group(1)
-                    node_id = current_node # Gunakan node yang baru saja ditangkap
-                    
+                    node_id = current_node            
+                    node_key = node_id.lower()        
+
                     if len(hex_str) == 125:
-                        spectrum_values = []
-                        for char in hex_str:
-                            try:
-                                spectrum_values.append(int(char, 16))
-                            except ValueError:
-                                spectrum_values.append(0)
-                        
-                        # Inisialisasi list untuk node ini jika belum ada
-                        if node_id not in data_windows:
+                        spectrum_bits = hex_to_bits(hex_str)
+
+                        if node_id not in calib_pool:
+                            calib_pool[node_id] = []
                             data_windows[node_id] = []
-                            
-                        # Process for time-series prediction per Node
-                        data_windows[node_id].append(spectrum_values)
+                            stride_counter[node_id] = 0
+
+                        # SINKRON WEB
+                        send_raw_to_firebase(node_key, hex_str, current_ts_wib,
+                                             current_rssi, current_snr)
+
+                        frame_burst = get_burst_count(spectrum_bits)
+                        frame_active = sum(spectrum_bits)
+
+                        # ====== FASE 1: KALIBRASI DINAMIS ======
+                        if node_id not in frozen:
+                            pool = calib_pool[node_id]
+                            pool.append((frame_burst, frame_active))
+                            n = len(pool)
+                            print(f"[KALIBRASI {node_id}] frame {n}/{CALIB_SAMPLES} | burst={frame_burst} | active={frame_active}")
+                            log_csv(node_id, frame_burst, frame_active, 0, 0, 0, "kalibrasi")
+
+                            if n == CALIB_SAMPLES:
+                                # Ekstrak nilai burst dan active ke dalam list terpisah
+                                burst_list = [p[0] for p in pool]
+                                active_list = [p[1] for p in pool]
+
+                                # Hitung Nilai Rata-Rata (Mean)
+                                mean_b = statistics.mean(burst_list)
+                                mean_a = statistics.mean(active_list)
+
+                                # Hitung Standar Deviasi (StDev) dengan batas minimum
+                                std_b = max(MIN_STDEV_BURST, statistics.stdev(burst_list))
+                                std_a = max(MIN_STDEV_ACTIVE, statistics.stdev(active_list))
+
+                                # Hitung Threshold Adaptif: Mean + (K * StDev)
+                                thr_burst = mean_b + (K_FACTOR * std_b)
+                                thr_active = mean_a + (K_FACTOR * std_a)
+
+                                frozen[node_id] = {
+                                    "baseline_burst": mean_b,
+                                    "baseline_active": mean_a,
+                                    "std_burst": std_b,
+                                    "std_active": std_a,
+                                    "thr_burst": thr_burst,
+                                    "thr_active": thr_active,
+                                }
+                                fz = frozen[node_id]
+                                
+                                print("\n" + "#"*60)
+                                print(f"KALIBRASI {node_id} SELESAI - BASELINE ADAPTIF DIKUNCI")
+                                print(f"Rata-Rata Lingkungan: burst={mean_b:.2f} | active={mean_a:.2f}")
+                                print(f"Standar Deviasi (σ) : burst={std_b:.2f} | active={std_a:.2f}")
+                                print(f"Threshold (Mean+3σ) : burst={fz['thr_burst']:.2f} | active={fz['thr_active']:.2f}")
+                                print(f"Mulai FASE DETEKSI dengan Window={WINDOW_SIZE}, Stride={STRIDE}.")
+                                print("#"*60 + "\n")
+                            continue
+
+                        # ====== FASE 2: DETEKSI ======
+                        data_windows[node_id].append(spectrum_bits)
                         if len(data_windows[node_id]) > WINDOW_SIZE:
                             data_windows[node_id].pop(0)
-                            
-                        print(f"-> Data Hex diterima dari {node_id} ({len(data_windows[node_id])}/5)")
-                            
-                        if len(data_windows[node_id]) == WINDOW_SIZE:
+
+                        stride_counter[node_id] += 1
+                        print(f"-> Data Hex diterima dari {node_id} ({len(data_windows[node_id])}/{WINDOW_SIZE})")
+
+                        if len(data_windows[node_id]) == WINDOW_SIZE and stride_counter[node_id] >= STRIDE:
+                            stride_counter[node_id] = 0
                             window_data = data_windows[node_id]
+
                             burst_counts = [get_burst_count(row) for row in window_data]
-                            spatial_entropies = [get_spatial_entropy(row) for row in window_data]
-                            
                             burst_count_mean = sum(burst_counts) / WINDOW_SIZE
-                            spatial_entropy_mean = sum(spatial_entropies) / WINDOW_SIZE
-                            total_active_mean = sum([sum(row) for row in window_data]) / WINDOW_SIZE
-                            
-                            # Logika Prediksi diprioritaskan sepenuhnya pada Burst Count
-                            predicted_as_drone = (burst_count_mean >= THRESHOLD_BURST)
-                            
-                            status = "DRONE TERDETEKSI 🚁 !!!" if predicted_as_drone else "AMAN ✅ (Tidak ada Drone)"
-                            
+                            active_ch_mean = sum([sum(row) for row in window_data]) / WINDOW_SIZE
+
+                            fz = frozen[node_id]
+                            thr_burst_eff = fz["thr_burst"]
+                            thr_active_eff = fz["thr_active"]
+
+                            cond_burst = burst_count_mean >= thr_burst_eff
+                            cond_active = active_ch_mean >= thr_active_eff
+                            predicted_as_drone = cond_burst or cond_active
+
+                            status = "DRONE TERDETEKSI !!!" if predicted_as_drone else "AMAN (Tidak ada Drone)"
+
                             print("\n" + "="*60)
                             print(f"[{time.strftime('%H:%M:%S')}] ANALISIS TIME-SERIES LOKASI: {node_id}")
-                            print(f"Burst Mean   : {burst_count_mean:.2f} \t(Threshold: {THRESHOLD_BURST})")
-                            print(f"Entropy Mean : {spatial_entropy_mean:.2f} \t(Threshold: {THRESHOLD_ENTROPY})")
-                            print(f"Active Mean  : {total_active_mean:.2f} \t(Threshold: {THRESHOLD_ACTIVE})")
-                            print(f"-> KEPUTUSAN : {status} DI LOKASI {node_id}")
+                            print(f"Baseline (Mean): burst={fz['baseline_burst']:.2f} | active={fz['baseline_active']:.2f}  (TERKUNCI)")
+                            print(f"Burst Mean     : {burst_count_mean:.2f} \t(Threshold: {thr_burst_eff:.2f}) \t{'[V]' if cond_burst else '[ ]'}")
+                            print(f"Active Mean    : {active_ch_mean:.2f} \t(Threshold: {thr_active_eff:.2f}) \t{'[V]' if cond_active else '[ ]'}")
+                            print(f"Aturan Deteksi : OR - minimal satu parameter melewati Threshold Adaptif")
+                            print(f"-> KEPUTUSAN   : {status} DI LOKASI {node_id}")
                             print("="*60 + "\n")
+
+                            log_csv(node_id, burst_count_mean, active_ch_mean,
+                                    fz["baseline_burst"], fz["baseline_active"],
+                                    1 if predicted_as_drone else 0, "deteksi")
+
+                            # SINKRON WEB + ARSIP
+                            send_prediction_to_firebase(node_id, node_key, predicted_as_drone)
             else:
                 time.sleep(0.01)
         except Exception as e:
@@ -128,13 +282,12 @@ def read_from_port(ser):
 if __name__ == "__main__":
     port_name = auto_detect_port()
     if not port_name:
-        print("Warning: No serial port detected! Please plug in your ESP32.")
+        print("Warning: No serial port detected! Please plug in your ESP32 Gateway.")
     else:
         print(f"Connecting to serial port: {port_name} at 115200 baud...")
         try:
             ser = serial.Serial(port_name, 115200, timeout=1)
             print("Serial connection established successfully. Waiting for data...")
-            # Run the serial reading loop directly in the main thread
             read_from_port(ser)
         except Exception as e:
             print(f"Failed to open serial port: {e}")
