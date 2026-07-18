@@ -54,34 +54,27 @@ def firebase_patch(path, data):
         print(f"-> Gagal PATCH {path}: {e}")
         return False
 
-def send_raw_to_firebase(node_key, data_hex, timestamp_wib, rssi, snr):
-    """Kirim data mentah tiap frame -> kartu node & hex viewer di web hidup."""
-    ok = firebase_patch(f"detection_system/{node_key}", {
-        "node": node_key,
+def send_raw_to_firebase(node_id, data_hex, timestamp_wib, rssi, snr):
+    """Kirim data mentah tiap frame ke Timeseries."""
+    current_date = time.strftime("%Y-%m-%d ")
+    ok = firebase_patch(f"Timeseries/{node_id}", {
+        "node": node_id,
         "data_hex": data_hex,
-        "timestamp_wib": timestamp_wib,
-        "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": current_date + timestamp_wib,
         "rssi": rssi,
         "snr": snr,
     })
     if ok:
-        print(f"-> Raw frame {node_key} -> detection_system (rssi={rssi}, snr={snr})")
+        print(f"-> Raw frame {node_id} -> Timeseries (rssi={rssi}, snr={snr})")
 
-def send_prediction_to_firebase(node_id, node_key, is_drone):
-    """Kirim hasil deteksi ke dua path: web (detection_system) + arsip (Timeseries)."""
-    pred_id = 1 if is_drone else 0
-    label = "DRONE TERDETEKSI" if is_drone else "AMAN"
-
-    firebase_patch(f"detection_system/{node_key}", {
-        "prediction_id": pred_id,
-        "prediction_label": label,
-        "prediction_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    })
+def send_prediction_to_firebase(node_id, is_drone):
+    """Kirim hasil deteksi ke Timeseries."""
+    status_str = "Drone Terdeteksi" if is_drone else "Aman"
     firebase_patch(f"Timeseries/{node_id}", {
-        "prediction": "Drone Terdeteksi" if is_drone else "Aman",
+        "prediction": status_str,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
-    print(f"-> Prediksi {node_key} terkirim (id={pred_id}, {label})")
+    print(f"-> Prediksi {node_id} terkirim (Prediction: {status_str})")
 
 # ==============================================================
 # KONFIGURASI DETEKSI ADAPTIF (Z-SCORE)
@@ -224,8 +217,8 @@ def read_from_port(ser):
                             data_windows[node_id] = []
                             stride_counter[node_id] = 0
 
-                        # SINKRONISASI KE WEB
-                        send_raw_to_firebase(node_key, hex_str, current_ts_wib, current_rssi, current_snr)
+                        # SINKRONISASI KE WEB (Timeseries)
+                        send_raw_to_firebase(node_id, hex_str, current_ts_wib, current_rssi, current_snr)
 
                         frame_burst = get_burst_count(spectrum_bits)
                         frame_active = sum(spectrum_bits)
@@ -235,31 +228,31 @@ def read_from_port(ser):
                             if node_id not in calib_pool_normal:
                                 calib_pool_normal[node_id] = []
                             pool = calib_pool_normal[node_id]
-                            pool.append((frame_burst, frame_active))
-                            n = len(pool)
-                            print(f"[KALIBRASI TAHAP 1 (NORMAL) - {node_id}] frame {n}/{CALIB_SAMPLES} | burst={frame_burst} | active={frame_active}")
-                            log_csv(node_id, frame_burst, frame_active, 0, 0, 0, "kalibrasi_normal")
+                            if len(pool) < CALIB_SAMPLES:
+                                pool.append((frame_burst, frame_active))
+                                print(f"[KALIBRASI TAHAP 1 (NORMAL) - {node_id}] frame {len(pool)}/{CALIB_SAMPLES} | burst={frame_burst} | active={frame_active}")
+                                log_csv(node_id, frame_burst, frame_active, 0, 0, 0, "kalibrasi_normal")
 
-                            if n == CALIB_SAMPLES:
-                                # Hitung baseline normal
-                                burst_list = [p[0] for p in pool]
-                                active_list = [p[1] for p in pool]
-                                
-                                mean_bn = statistics.mean(burst_list)
-                                std_bn = max(MIN_STDEV_BURST, statistics.stdev(burst_list))
-                                mean_an = statistics.mean(active_list)
-                                std_an = max(MIN_STDEV_ACTIVE, statistics.stdev(active_list))
+                            # Cek jika semua node yang aktif/terdaftar sudah mencapai CALIB_SAMPLES
+                            if len(calib_pool_normal) > 0 and all(len(p) >= CALIB_SAMPLES for p in calib_pool_normal.values()):
+                                for nid, p_data in calib_pool_normal.items():
+                                    burst_list = [p[0] for p in p_data]
+                                    active_list = [p[1] for p in p_data]
+                                    
+                                    mean_bn = statistics.mean(burst_list)
+                                    std_bn = max(MIN_STDEV_BURST, statistics.stdev(burst_list))
+                                    mean_an = statistics.mean(active_list)
+                                    std_an = max(MIN_STDEV_ACTIVE, statistics.stdev(active_list))
 
-                                frozen[node_id] = {
-                                    "normal_mean_burst": mean_bn,
-                                    "normal_std_burst": std_bn,
-                                    "normal_mean_active": mean_an,
-                                    "normal_std_active": std_an,
-                                }
-                                
-                                # Bersihkan buffer serial dan minta input user untuk tahap 2
-                                print(f"\n[OK] Kalibrasi Tahap 1 (Normal) Selesai untuk {node_id}.")
-                                print(f"-> Baseline Normal: burst={mean_bn:.2f} (std={std_bn:.2f}) | active={mean_an:.2f} (std={std_an:.2f})")
+                                    frozen[nid] = {
+                                        "normal_mean_burst": mean_bn,
+                                        "normal_std_burst": std_bn,
+                                        "normal_mean_active": mean_an,
+                                        "normal_std_active": std_an,
+                                    }
+                                    print(f"\n[OK] Kalibrasi Tahap 1 (Normal) Selesai untuk {nid}.")
+                                    print(f"-> Baseline Normal: burst={mean_bn:.2f} (std={std_bn:.2f}) | active={mean_an:.2f} (std={std_an:.2f})")
+
                                 print("\n" + "="*60)
                                 print("PERSIAPAN KALIBRASI TAHAP 2 (DENGAN DRONE)")
                                 print("Silakan nyalakan drone Anda dan posisikan dekat dengan sensor.")
@@ -283,54 +276,55 @@ def read_from_port(ser):
                             if node_id not in calib_pool_drone:
                                 calib_pool_drone[node_id] = []
                             pool = calib_pool_drone[node_id]
-                            pool.append((frame_burst, frame_active))
-                            n = len(pool)
-                            print(f"[KALIBRASI TAHAP 2 (DRONE) - {node_id}] frame {n}/{CALIB_SAMPLES} | burst={frame_burst} | active={frame_active}")
-                            log_csv(node_id, frame_burst, frame_active, 0, 0, 0, "kalibrasi_drone")
+                            if len(pool) < CALIB_SAMPLES:
+                                pool.append((frame_burst, frame_active))
+                                print(f"[KALIBRASI TAHAP 2 (DRONE) - {node_id}] frame {len(pool)}/{CALIB_SAMPLES} | burst={frame_burst} | active={frame_active}")
+                                log_csv(node_id, frame_burst, frame_active, 0, 0, 0, "kalibrasi_drone")
 
-                            if n == CALIB_SAMPLES:
-                                # Hitung baseline drone
-                                burst_list = [p[0] for p in pool]
-                                active_list = [p[1] for p in pool]
-                                
-                                mean_bd = statistics.mean(burst_list)
-                                std_bd = max(MIN_STDEV_BURST, statistics.stdev(burst_list))
-                                mean_ad = statistics.mean(active_list)
-                                std_ad = max(MIN_STDEV_ACTIVE, statistics.stdev(active_list))
+                            # Cek jika semua node yang terdaftar di Stage 1 sudah selesai di Stage 2
+                            if all(nid in calib_pool_drone and len(calib_pool_drone[nid]) >= CALIB_SAMPLES for nid in calib_pool_normal.keys()):
+                                for nid in calib_pool_normal.keys():
+                                    p_data = calib_pool_drone[nid]
+                                    burst_list = [p[0] for p in p_data]
+                                    active_list = [p[1] for p in p_data]
+                                    
+                                    mean_bd = statistics.mean(burst_list)
+                                    std_bd = max(MIN_STDEV_BURST, statistics.stdev(burst_list))
+                                    mean_ad = statistics.mean(active_list)
+                                    std_ad = max(MIN_STDEV_ACTIVE, statistics.stdev(active_list))
 
-                                fz = frozen[node_id]
-                                fz["drone_mean_burst"] = mean_bd
-                                fz["drone_std_burst"] = std_bd
-                                fz["drone_mean_active"] = mean_ad
-                                fz["drone_std_active"] = std_ad
+                                    fz = frozen[nid]
+                                    fz["drone_mean_burst"] = mean_bd
+                                    fz["drone_std_burst"] = std_bd
+                                    fz["drone_mean_active"] = mean_ad
+                                    fz["drone_std_active"] = std_ad
 
-                                # Hitung Threshold Adaptif rekomendasi (nilai tengah antara normal dan drone)
-                                thr_burst_calib = (fz["normal_mean_burst"] + mean_bd) / 2
-                                thr_active_calib = (fz["normal_mean_active"] + mean_ad) / 2
+                                    # Hitung Threshold Adaptif rekomendasi
+                                    thr_burst_calib = (fz["normal_mean_burst"] + mean_bd) / 2
+                                    thr_active_calib = (fz["normal_mean_active"] + mean_ad) / 2
 
-                                # Simpan hasil threshold rekomendasi
-                                fz["thr_burst_calib"] = thr_burst_calib
-                                fz["thr_active_calib"] = thr_active_calib
+                                    fz["thr_burst_calib"] = thr_burst_calib
+                                    fz["thr_active_calib"] = thr_active_calib
 
-                                # Hitung Jarak Standar Deviasi Threshold Lama terhadap Baseline Normal (Z-Score)
-                                z_burst_old = (DEFAULT_THRESHOLD_BURST - fz["normal_mean_burst"]) / fz["normal_std_burst"]
-                                z_active_old = (DEFAULT_THRESHOLD_ACTIVE - fz["normal_mean_active"]) / fz["normal_std_active"]
+                                    # Hitung Jarak Standar Deviasi Threshold Lama terhadap Baseline Normal (Z-Score)
+                                    z_burst_old = (DEFAULT_THRESHOLD_BURST - fz["normal_mean_burst"]) / fz["normal_std_burst"]
+                                    z_active_old = (DEFAULT_THRESHOLD_ACTIVE - fz["normal_mean_active"]) / fz["normal_std_active"]
 
-                                print("\n" + "#"*60)
-                                print(f"KALIBRASI {node_id} SELESAI - HASIL ANALISIS")
-                                print("#"*60)
-                                print(f"Baseline TANPA Drone : burst={fz['normal_mean_burst']:.2f} (std={fz['normal_std_burst']:.2f}) | active={fz['normal_mean_active']:.2f} (std={fz['normal_std_active']:.2f})")
-                                print(f"Baseline DENGAN Drone: burst={mean_bd:.2f} (std={std_bd:.2f}) | active={mean_ad:.2f} (std={std_ad:.2f})")
-                                print("-"*60)
-                                print(f"Threshold Default     : burst={DEFAULT_THRESHOLD_BURST:.2f} | active={DEFAULT_THRESHOLD_ACTIVE:.2f}")
-                                print(f"Jarak Threshold Lama terhadap Baseline Normal (Z-Score):")
-                                print(f"  - Jarak Burst  : {z_burst_old:.2f} σ")
-                                print(f"  - Jarak Active : {z_active_old:.2f} σ")
-                                print("-"*60)
-                                print(f"Threshold Kalibrasi Baru (Rekomendasi Tengah):")
-                                print(f"  - RECOMMENDED BURST  : {thr_burst_calib:.2f}")
-                                print(f"  - RECOMMENDED ACTIVE : {thr_active_calib:.2f}")
-                                print("#"*60 + "\n")
+                                    print("\n" + "#"*60)
+                                    print(f"KALIBRASI {nid} SELESAI - HASIL ANALISIS")
+                                    print("#"*60)
+                                    print(f"Baseline TANPA Drone : burst={fz['normal_mean_burst']:.2f} (std={fz['normal_std_burst']:.2f}) | active={fz['normal_mean_active']:.2f} (std={fz['normal_std_active']:.2f})")
+                                    print(f"Baseline DENGAN Drone: burst={mean_bd:.2f} (std={std_bd:.2f}) | active={mean_ad:.2f} (std={std_ad:.2f})")
+                                    print("-"*60)
+                                    print(f"Threshold Default     : burst={DEFAULT_THRESHOLD_BURST:.2f} | active={DEFAULT_THRESHOLD_ACTIVE:.2f}")
+                                    print(f"Jarak Threshold Lama terhadap Baseline Normal (Z-Score):")
+                                    print(f"  - Jarak Burst  : {z_burst_old:.2f} σ")
+                                    print(f"  - Jarak Active : {z_active_old:.2f} σ")
+                                    print("-"*60)
+                                    print(f"Threshold Kalibrasi Baru (Rekomendasi Tengah):")
+                                    print(f"  - RECOMMENDED BURST  : {thr_burst_calib:.2f}")
+                                    print(f"  - RECOMMENDED ACTIVE : {thr_active_calib:.2f}")
+                                    print("#"*60 + "\n")
 
                                 print("PILIHAN TINDAKAN:")
                                 print("1. Lanjut Deteksi (Menggunakan Threshold Kalibrasi Baru)")
@@ -350,9 +344,7 @@ def read_from_port(ser):
                                 if post_choice == "1":
                                     op_mode = "calibrated"
                                     calib_state = "done"
-                                    active_thr_burst = thr_burst_calib
-                                    active_thr_active = thr_active_calib
-                                    print(f"\n>>> MULAI DETEKSI (Menggunakan Threshold Kalibrasi: Burst={active_thr_burst:.2f}, Active={active_thr_active:.2f}) <<<")
+                                    print(f"\n>>> MULAI DETEKSI (Menggunakan Threshold Kalibrasi Hasil Analisis) <<<")
                                 elif post_choice == "2":
                                     calib_state = "stage1_normal"
                                     calib_pool_normal.clear()
@@ -378,8 +370,16 @@ def read_from_port(ser):
                             burst_count_mean = sum(burst_counts) / WINDOW_SIZE
                             active_ch_mean = sum([sum(row) for row in window_data]) / WINDOW_SIZE
 
-                            cond_burst = burst_count_mean >= active_thr_burst
-                            cond_active = active_ch_mean >= active_thr_active
+                            # Tentukan threshold yang digunakan (adaptif per node atau default)
+                            if op_mode == "calibrated" and node_id in frozen:
+                                thr_b = frozen[node_id]["thr_burst_calib"]
+                                thr_a = frozen[node_id]["thr_active_calib"]
+                            else:
+                                thr_b = DEFAULT_THRESHOLD_BURST
+                                thr_a = DEFAULT_THRESHOLD_ACTIVE
+
+                            cond_burst = burst_count_mean >= thr_b
+                            cond_active = active_ch_mean >= thr_a
                             predicted_as_drone = cond_burst or cond_active
 
                             status = "DRONE TERDETEKSI !!!" if predicted_as_drone else "AMAN (Tidak ada Drone)"
@@ -387,8 +387,8 @@ def read_from_port(ser):
                             print("\n" + "="*60)
                             print(f"[{time.strftime('%H:%M:%S')}] ANALISIS TIME-SERIES LOKASI: {node_id}")
                             print(f"Mode Operasi   : {'KALIBRASI BARU' if op_mode == 'calibrated' else 'THRESHOLD DEFAULT'}")
-                            print(f"Burst Mean     : {burst_count_mean:.2f} \t(Threshold: {active_thr_burst:.2f}) \t{'[V]' if cond_burst else '[ ]'}")
-                            print(f"Active Mean    : {active_ch_mean:.2f} \t(Threshold: {active_thr_active:.2f}) \t{'[V]' if cond_active else '[ ]'}")
+                            print(f"Burst Mean     : {burst_count_mean:.2f} \t(Threshold: {thr_b:.2f}) \t{'[V]' if cond_burst else '[ ]'}")
+                            print(f"Active Mean    : {active_ch_mean:.2f} \t(Threshold: {thr_a:.2f}) \t{'[V]' if cond_active else '[ ]'}")
                             print(f"Aturan Deteksi : OR - minimal satu parameter melewati Threshold")
                             print(f"-> KEPUTUSAN   : {status} DI LOKASI {node_id}")
                             print("="*60 + "\n")
@@ -398,8 +398,8 @@ def read_from_port(ser):
                                     frozen.get(node_id, {}).get("normal_mean_active", 0.0),
                                     1 if predicted_as_drone else 0, "deteksi")
 
-                            # SINKRON WEB + ARSIP
-                            send_prediction_to_firebase(node_id, node_key, predicted_as_drone)
+                            # SINKRONISASI KE WEB (Timeseries)
+                            send_prediction_to_firebase(node_id, predicted_as_drone)
             else:
                 time.sleep(0.01)
         except Exception as e:
