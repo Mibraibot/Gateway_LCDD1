@@ -341,8 +341,13 @@ void handleNodeReply() {
   while (LoRa.available())
     receivedData += (char)LoRa.read();
 
-  // Cetak blok JSON untuk dibaca app.py (format tidak diubah; data_hex
-  // dari node adalah murni 125 karakter '0'/'1', diteruskan apa adanya)
+  // QoS: RTT poll -> balasan diukur dengan jam gateway sendiri (millis),
+  // bebas masalah sinkronisasi jam antar perangkat. Mencakup airtime poll
+  // + proses node (field "proc" di payload) + airtime balasan.
+  unsigned long pollRtt = millis() - pollStartTime;
+
+  // Cetak blok JSON untuk dibaca app.py (data_hex dari node adalah murni
+  // 125 karakter '0'/'1', diteruskan apa adanya; field QoS ditambahkan)
   Serial.println(F("{"));
   Serial.println(F("  \"event\": \"data_received\","));
   Serial.print(F("  \"rssi\": "));
@@ -350,6 +355,12 @@ void handleNodeReply() {
   Serial.println(F(","));
   Serial.print(F("  \"snr\": "));
   Serial.print(LoRa.packetSnr());
+  Serial.println(F(","));
+  Serial.print(F("  \"poll_rtt_ms\": "));
+  Serial.print(pollRtt);
+  Serial.println(F(","));
+  Serial.print(F("  \"payload_len\": "));
+  Serial.print(packetSize);
   Serial.println(F(","));
   Serial.print(F("  \"payload\": "));
   Serial.println(receivedData);
@@ -515,6 +526,12 @@ void loop() {
       if (now - pollStartTime > POLL_TIMEOUT) {
         Serial.println(">>> Timeout! Node" + String(POLL_NODES[pollIndex]) +
                        " tidak merespon.");
+        // Event QoS satu baris: backend menghitung packet loss dari sini
+        // (paket dianggap hilang di segmen Node -> Gateway)
+        Serial.print(F("{\"event\":\"poll_timeout\",\"node\":\"Node"));
+        Serial.print(POLL_NODES[pollIndex]);
+        Serial.println(F("\"}"));
+        Serial.println(F("--------------------------------"));
         bool wasOnline = missCount[pollIndex] < OFFLINE_AFTER_MISSES;
         if (missCount[pollIndex] < OFFLINE_AFTER_MISSES)
           missCount[pollIndex]++;
