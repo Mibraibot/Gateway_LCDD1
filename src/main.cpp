@@ -10,8 +10,8 @@
 // ============================================================================
 // KREDENSIAL WIFI (hanya untuk NTP, TIDAK ada koneksi Firebase di gateway)
 // ============================================================================
-const char *ssid = "AN-WIFI";
-const char *password = "12345678";
+const char *ssid = "ULIN";
+const char *password = "ulinppc245";
 
 // --- KONFIGURASI NTP (WIB = UTC+7) ---
 const char *ntpServer = "pool.ntp.org";
@@ -34,12 +34,44 @@ const int daylightOffset_sec = 0;
 // #  (Node yang timeout dilewati, giliran lanjut ke node      #
 // #   berikutnya.)                                            #
 // #############################################################
-const uint8_t POLL_NODES[] = {3};
+const uint8_t POLL_NODES[] = {1, 2, 3};
 
 const uint8_t NUM_POLL_NODES = sizeof(POLL_NODES) / sizeof(POLL_NODES[0]);
-const unsigned long POLL_TIMEOUT = 3000;    // ms menunggu balasan node
-const unsigned long POLL_GAP = 500;         // ms jeda antar giliran poll
+
+// Anggaran waktu balasan node (SF7, data_hex tetap 125 karakter '0'/'1'):
+//   airtime poll ~87ms + scan NRF ~330ms + OLED/serial node ~40ms +
+//   airtime balasan 182B ~292ms  =  ~750ms  ->  timeout 1500ms margin ~2x.
+// Node yang mati kini hanya menahan siklus 1,5 dtk (sebelumnya 3 dtk).
+const unsigned long POLL_TIMEOUT = 1500;    // ms menunggu balasan node
+// Node kembali siap RX beberapa ms setelah transmit; 100ms sudah cukup
+// aman (sebelumnya 500ms yang membuang 0,4 dtk tiap giliran).
+const unsigned long POLL_GAP = 100;         // ms jeda antar giliran poll
 const unsigned long SYNC_INTERVAL = 300000; // broadcast sync ulang tiap 5 menit
+
+// ============================================================================
+// BACKOFF NODE OFFLINE (anti-macet antar node)
+// Tanpa ini, satu node mati (kasus Node1) menahan siklus SETIAP putaran
+// selama POLL_TIMEOUT — node sehat ikut melambat. Dengan backoff: setelah
+// 2x timeout beruntun node ditandai offline dan hanya di-probe tiap 5 dtk;
+// node sehat terus berputar dengan kecepatan penuh. Begitu node offline
+// menjawab probe (dan langsung tersinkron dari "time" di paket poll), ia
+// otomatis kembali masuk rotasi normal.
+// ============================================================================
+const uint8_t OFFLINE_AFTER_MISSES = 2;
+const unsigned long OFFLINE_PROBE_MS = 5000;
+
+// Pemulihan mandiri: bila TIDAK ADA SATU PUN balasan selama 30 dtk padahal
+// sedang LISTENING, kemungkinan radio gateway sendiri yang macet — reset +
+// konfigurasi ulang modul LoRa via software (tanpa sentuh kabel/pin).
+const unsigned long RADIO_STALL_MS = 30000;
+
+// ============================================================================
+// KONFIGURASI RADIO — HARUS IDENTIK DENGAN NODE!
+// SF7 (sebelumnya SF9): airtime turun ~4x. Dengan RSSI node -35..-47 dBm
+// margin link masih sangat besar. Bila node ditempatkan jauh (RSSI di bawah
+// sekitar -100 dBm), naikkan LORA_SF ke 8 atau 9 DI KEDUA SISI.
+// ============================================================================
+#define LORA_SF 7
 
 // ============================================================================
 // PIN & HARDWARE
@@ -75,6 +107,11 @@ unsigned long pollStartTime = 0;
 unsigned long nextPollTime = 0; // kapan poll berikutnya boleh dikirim
 unsigned long lastSyncBroadcast = 0;
 
+// State backoff offline per node (paralel dengan POLL_NODES[])
+uint8_t missCount[NUM_POLL_NODES] = {0};
+unsigned long probeDueAt[NUM_POLL_NODES] = {0};
+unsigned long lastReplyTime = 0; // balasan terakhir dari node mana pun
+
 bool showingInfoScreen = false;
 unsigned long infoScreenStartTime = 0;
 
@@ -83,6 +120,33 @@ bool btn2State = HIGH, btn2LastReading = HIGH;
 unsigned long btn2DebounceTime = 0;
 bool btn2WaitingDouble = false;
 unsigned long btn2ClickTimer = 0;
+
+// ============================================================================
+// KONFIGURASI & PEMULIHAN MANDIRI RADIO
+// ============================================================================
+void configureLoRaRadio() {
+  // Konfigurasi HARUS sama dengan node
+  LoRa.setSpreadingFactor(LORA_SF);
+  LoRa.setSyncWord(0x34);
+  LoRa.setTxPower(10); // Daya rendah untuk stabilitas catu daya
+  // CRC aktif: paket korup dibuang radio, tidak lolos ke parser dan tidak
+  // membuang satu giliran polling untuk data rusak
+  LoRa.enableCrc();
+}
+
+// LoRa.begin() memicu reset hardware modul lewat pin RST yang memang sudah
+// terpasang, lalu semua register dikonfigurasi ulang — murni software.
+void recoverLoRa() {
+  LoRa.sleep();
+  if (LoRa.begin(433E6)) {
+    configureLoRaRadio();
+    loraActive = true;
+    Serial.println(F(">>> Radio LoRa di-reset & dikonfigurasi ulang."));
+  } else {
+    loraActive = false;
+    Serial.println(F(">>> Re-init radio LoRa GAGAL!"));
+  }
+}
 
 // ============================================================================
 // LAYAR INFO GATEWAY
@@ -206,12 +270,37 @@ void updateOLEDDisplay() {
 
 // ============================================================================
 // MAJUKAN GILIRAN POLLING KE NODE BERIKUTNYA
-// (Inilah satu-satunya logika rotasi: otomatis bekerja untuk 1 atau 3 node)
+// (Satu-satunya logika rotasi; otomatis bekerja untuk 1 atau 3 node.)
+// Node offline dilewati sampai jadwal probe-nya tiba, jadi node sehat tidak
+// pernah ikut menunggu POLL_TIMEOUT milik node yang mati.
 // ============================================================================
 void advancePolling() {
-  pollIndex = (pollIndex + 1) % NUM_POLL_NODES;
   waitingForReply = false;
-  nextPollTime = millis() + POLL_GAP;
+  unsigned long now = millis();
+
+  uint8_t fallbackIdx = pollIndex;
+  unsigned long fallbackDue = 0;
+  bool haveFallback = false;
+
+  for (uint8_t hop = 1; hop <= NUM_POLL_NODES; hop++) {
+    uint8_t idx = (pollIndex + hop) % NUM_POLL_NODES;
+    bool offline = missCount[idx] >= OFFLINE_AFTER_MISSES;
+    // (long) cast: aman terhadap wrap-around millis()
+    if (!offline || (long)(now - probeDueAt[idx]) >= 0) {
+      pollIndex = idx;
+      nextPollTime = now + POLL_GAP;
+      return;
+    }
+    if (!haveFallback || (long)(probeDueAt[idx] - fallbackDue) < 0) {
+      fallbackIdx = idx;
+      fallbackDue = probeDueAt[idx];
+      haveFallback = true;
+    }
+  }
+
+  // Semua node sedang offline: langsung tidur sampai jadwal probe terdekat
+  pollIndex = fallbackIdx;
+  nextPollTime = fallbackDue;
 }
 
 // ============================================================================
@@ -220,8 +309,18 @@ void advancePolling() {
 void sendPoll() {
   String cmd = "POLL_Node" + String(POLL_NODES[pollIndex]);
 
+  // Paket ringkas (field "type" dibuang; node mencocokkan substring
+  // "command":"POLL_NodeX" jadi tetap kompatibel) + epoch WIB dititipkan di
+  // SETIAP poll: node yang baru menyala/restart langsung tersinkron dari
+  // poll pertama yang didengarnya, tanpa menunggu broadcast 5-menit.
+  String pkt = "{\"command\":\"" + cmd + "\"";
+  time_t nowEpoch = time(nullptr);
+  if (nowEpoch >= 1000000000)
+    pkt += ",\"time\":" + String((unsigned long)(nowEpoch + gmtOffset_sec));
+  pkt += "}";
+
   LoRa.beginPacket();
-  LoRa.print("{\"type\":\"command\",\"command\":\"" + cmd + "\"}");
+  LoRa.print(pkt);
   LoRa.endPacket();
 
   Serial.println(">>> Mengirim Komando Panggil: " + cmd);
@@ -242,7 +341,8 @@ void handleNodeReply() {
   while (LoRa.available())
     receivedData += (char)LoRa.read();
 
-  // Cetak blok JSON untuk dibaca app.py (format tidak diubah)
+  // Cetak blok JSON untuk dibaca app.py (format tidak diubah; data_hex
+  // dari node adalah murni 125 karakter '0'/'1', diteruskan apa adanya)
   Serial.println(F("{"));
   Serial.println(F("  \"event\": \"data_received\","));
   Serial.print(F("  \"rssi\": "));
@@ -266,6 +366,11 @@ void handleNodeReply() {
       receivedData.indexOf(expectedTagOld) >= 0) {
     lastLoraRssi = LoRa.packetRssi();
     lastLoraMsg = receivedData;
+    lastReplyTime = millis();
+    if (missCount[pollIndex] >= OFFLINE_AFTER_MISSES)
+      Serial.println("-> Node" + String(POLL_NODES[pollIndex]) +
+                     " KEMBALI ONLINE, masuk rotasi normal lagi.");
+    missCount[pollIndex] = 0;
     Serial.println("-> Balasan diterima dari Node" +
                    String(POLL_NODES[pollIndex]));
     if (!showingInfoScreen)
@@ -361,11 +466,7 @@ void setup() {
       ;
   }
   loraActive = true;
-
-  // Konfigurasi HARUS sama dengan node
-  LoRa.setSpreadingFactor(9);
-  LoRa.setSyncWord(0x34);
-  LoRa.setTxPower(10); // Daya rendah untuk stabilitas catu daya
+  configureLoRaRadio();
 
   Serial.println(F("Gateway LoRa Siap."));
 
@@ -373,6 +474,7 @@ void setup() {
   broadcastTimeSync(true);
   currentMode = MODE_LISTENING;
   nextPollTime = millis();
+  lastReplyTime = millis();
   updateOLEDDisplay();
 }
 
@@ -385,10 +487,27 @@ void loop() {
 
   // ------------------- SIKLUS POLLING -------------------
   if (currentMode == MODE_LISTENING) {
+    // Pemulihan mandiri: 30 dtk tanpa satu balasan pun bisa berarti radio
+    // gateway sendiri yang macet (bukan node) — reset & konfigurasi ulang.
+    // Kalau ternyata semua node memang mati, re-init ini tidak merugikan.
+    if (now - lastReplyTime > RADIO_STALL_MS) {
+      Serial.println(F(">>> 30 dtk tanpa balasan dari node mana pun — "
+                       "re-init radio LoRa (pemulihan mandiri)."));
+      recoverLoRa();
+      lastReplyTime = now;
+      waitingForReply = false;
+      nextPollTime = now + POLL_GAP;
+    }
+
     if (!waitingForReply) {
       // Broadcast sync periodik saat idle (node yang restart bisa ikut lagi)
-      if (now - lastSyncBroadcast > SYNC_INTERVAL)
+      if (now - lastSyncBroadcast > SYNC_INTERVAL) {
         broadcastTimeSync(false);
+        // Beri jeda sebelum poll berikutnya: node butuh waktu memproses
+        // paket sync dan kembali siap RX; poll yang dikirim beruntun di
+        // iterasi yang sama bisa hilang dan berujung timeout palsu
+        nextPollTime = millis() + POLL_GAP;
+      }
 
       if (now >= nextPollTime)
         sendPoll();
@@ -396,6 +515,17 @@ void loop() {
       if (now - pollStartTime > POLL_TIMEOUT) {
         Serial.println(">>> Timeout! Node" + String(POLL_NODES[pollIndex]) +
                        " tidak merespon.");
+        bool wasOnline = missCount[pollIndex] < OFFLINE_AFTER_MISSES;
+        if (missCount[pollIndex] < OFFLINE_AFTER_MISSES)
+          missCount[pollIndex]++;
+        if (missCount[pollIndex] >= OFFLINE_AFTER_MISSES) {
+          probeDueAt[pollIndex] = now + OFFLINE_PROBE_MS;
+          if (wasOnline)
+            Serial.println(">>> Node" + String(POLL_NODES[pollIndex]) +
+                           " ditandai OFFLINE; di-probe ulang tiap " +
+                           String(OFFLINE_PROBE_MS / 1000) +
+                           " dtk tanpa menahan node lain.");
+        }
         advancePolling(); // lewati, lanjut giliran berikutnya
       } else {
         handleNodeReply();
@@ -475,6 +605,7 @@ void loop() {
       pollIndex = 0;
       waitingForReply = false;
       nextPollTime = now;
+      lastReplyTime = now; // jangan langsung memicu pemulihan mandiri
       Serial.println(F("Mode: LISTENING. Mulai polling node..."));
       updateOLEDDisplay();
     }
