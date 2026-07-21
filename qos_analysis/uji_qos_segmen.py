@@ -279,6 +279,8 @@ def uji_segmen2(args):
         # qos_log.csv hasil pengukuran live: rangkum kolom decision/backend
         with open(sumber, encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
+        n_kalib = sum(1 for r in rows if r.get("event") == "kalibrasi")
+        print(f"[i] Frame fase kalibrasi di log: {n_kalib}")
         dec = [to_float(r.get("decision_ms")) for r in rows]
         dec = [x for x in dec if x is not None]
         tot = [to_float(r.get("backend_total_ms")) for r in rows]
@@ -311,20 +313,29 @@ def uji_segmen2(args):
         windows.setdefault(node, [])
         strides.setdefault(node, 0)
 
+        # ====== FASE 1: KALIBRASI DINAMIS (identik backend/app.py) ======
         if node not in frozen:
-            calib[node].append((get_burst_count(bits), sum(bits)))
-            if len(calib[node]) == CALIB_SAMPLES:
+            fb = get_burst_count(bits)
+            fa = sum(bits)
+            calib[node].append((fb, fa))
+            n = len(calib[node])
+            print(f"[KALIBRASI {node}] frame {n}/{CALIB_SAMPLES} "
+                  f"| burst={fb} | active={fa}")
+            rows_csv.append([i, node, "kalibrasi", "", "", fb, fa])
+
+            if n == CALIB_SAMPLES:
                 b = [x[0] for x in calib[node]]
                 a = [x[1] for x in calib[node]]
                 sb = max(MIN_STDEV_BURST, statistics.stdev(b))
                 sa = max(MIN_STDEV_ACTIVE, statistics.stdev(a))
                 frozen[node] = (statistics.mean(b) + K_FACTOR * sb,
                                 statistics.mean(a) + K_FACTOR * sa)
-                print(f"[i] Kalibrasi {node} selesai "
+                print(f"[i] KALIBRASI {node} SELESAI - baseline dikunci "
                       f"(thr_burst={frozen[node][0]:.2f}, "
                       f"thr_active={frozen[node][1]:.2f})")
             continue
 
+        # ====== FASE 2: DETEKSI ======
         windows[node].append(bits)
         if len(windows[node]) > WINDOW_SIZE:
             windows[node].pop(0)
@@ -338,7 +349,7 @@ def uji_segmen2(args):
             ms = (time.perf_counter() - t0) * 1000.0
             hasil_dec.append(ms)
             n_drone += 1 if drone else 0
-            rows_csv.append([i, node, "DRONE" if drone else "AMAN",
+            rows_csv.append([i, node, "deteksi", "DRONE" if drone else "AMAN",
                              round(ms, 4), round(bm, 2), round(am, 2)])
 
     cetak_statistik(
@@ -349,7 +360,7 @@ def uji_segmen2(args):
           "\n    delay keputusan didominasi menunggu window "
           f"({WINDOW_SIZE} frame) x siklus polling.")
     nama = f"uji_segmen2_{args.label}_{stempel()}.csv"
-    simpan_csv(nama, ["frame_ke", "node", "keputusan", "decision_ms",
+    simpan_csv(nama, ["frame_ke", "node", "fase", "keputusan", "decision_ms",
                       "burst_mean", "active_mean"], rows_csv)
 
 
