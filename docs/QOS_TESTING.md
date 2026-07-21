@@ -105,6 +105,29 @@ skripsi QoS di Indonesia):
    `laporan_qos.md` (tabel siap salin), `ringkasan_qos.csv` (untuk Excel),
    `grafik_*.png` (siap tempel di laporan).
 
+## 4b. Uji per Segmen Secara Terpisah (`uji_qos_segmen.py`)
+
+Selain SOP lengkap di atas, tiap segmen bisa diuji **sendiri-sendiri** dengan
+runner `qos_analysis/uji_qos_segmen.py` — berguna saat ingin mengisolasi
+masalah atau saat tidak semua komponen tersedia:
+
+| Perintah | Menguji | Kebutuhan |
+|---|---|---|
+| `python qos_analysis/uji_qos_segmen.py segmen1 --durasi 300 --label jarak20m` | Node→Gateway: RTT, RSSI/SNR, loss, dari serial gateway langsung | Gateway + node menyala (backend **jangan** jalan bersamaan — rebutan port serial) |
+| `python qos_analysis/uji_qos_segmen.py segmen2 --sumber dataset_x.json` | Pipeline keputusan: replay dataset rekaman melalui kalibrasi+deteksi, ukur `decision_ms` | Tidak butuh alat (offline) |
+| `python qos_analysis/uji_qos_segmen.py segmen2 --sumber qos_log.csv` | Rangkuman `decision_ms`/`backend_total_ms` dari pengukuran live | File `qos_log.csv` |
+| `python qos_analysis/uji_qos_segmen.py segmen3 --jumlah 100` | Backend→Firebase: probe PATCH beban nyata, RTT + estimasi satu-arah | Internet saja |
+| `python qos_analysis/uji_qos_segmen.py segmen4 --durasi 300` | Firebase→penerima realtime (simulasi frontend via Python SSE); keluaran kompatibel `--frontend` di analyze_qos.py | Backend + alat berjalan |
+| `python qos_analysis/uji_qos_segmen.py loopback --jumlah 50` | Jalur Firebase terisolasi (naik + turun), tanpa alat sama sekali | Internet saja |
+
+Keluaran `segmen1` memakai format kolom `qos_log.csv` dan keluaran `segmen4`
+memakai format export tab QoS website, jadi keduanya bisa langsung dianalisis:
+`python qos_analysis/analyze_qos.py --backend uji_segmen1_*.csv ...`.
+Mode `segmen3/4/loopback` hanya menulis ke path uji `qos/uji/*` — data
+deteksi produksi tidak disentuh. Untuk laporan, angka segmen 4 dari browser
+sungguhan (tab QoS → Export CSV) tetap jadi data utama; mode `segmen4`
+Python adalah pembanding/otomasinya.
+
 ## 5. Matriks Skenario yang Disarankan
 
 Sesuai arahan dosen ("tidak cukup hanya RF; modul lain, QoS, website,

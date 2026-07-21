@@ -7,3 +7,6 @@
 __pycache__/
 qos_log.csv
 hasil_qos_*/
+uji_segmen*.csv
+uji_loopback_*.csv
+qos_frontend_python_*.csv
