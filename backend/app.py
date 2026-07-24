@@ -16,11 +16,11 @@ FIREBASE_URL = "https://lowcostdronedetect-default-rtdb.asia-southeast1.firebase
 #
 # 1) detection_system/{node1|node2|node3}   <- dibaca website
 #    - data mentah: data_hex, rssi, snr, timestamp_wib, captured_at
-#    - hasil deteksi: prediction_id (0=AMAN, 1=DRONE),
-#      prediction_label, prediction_time
+#    - hasil deteksi: detection_id (0=AMAN, 1=DRONE),
+#      detection_label, detection_time
 #
 # 2) Timeseries/{Node1|Node2|Node3}
-#    - prediction: "Drone Terdeteksi" / "Aman"
+#    - detection: "Drone Terdeteksi" / "Aman"
 #    - timestamp : "YYYY-MM-DD HH:MM:SS"
 # ==============================================================
 
@@ -50,21 +50,21 @@ def send_raw_to_firebase(node_key, data_hex, timestamp_wib, rssi, snr):
     if ok:
         print(f"-> Raw frame {node_key} -> detection_system (rssi={rssi}, snr={snr})")
 
-def send_prediction_to_firebase(node_id, node_key, is_drone):
+def send_detection_to_firebase(node_id, node_key, is_drone):
     """Kirim hasil deteksi ke dua path: web (detection_system) + arsip (Timeseries)."""
-    pred_id = 1 if is_drone else 0
+    det_id = 1 if is_drone else 0
     label = "DRONE TERDETEKSI" if is_drone else "AMAN"
 
     firebase_patch(f"detection_system/{node_key}", {
-        "prediction_id": pred_id,
-        "prediction_label": label,
-        "prediction_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "detection_id": det_id,
+        "detection_label": label,
+        "detection_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     })
     firebase_patch(f"Timeseries/{node_id}", {
-        "prediction": "Drone Terdeteksi" if is_drone else "Aman",
+        "detection": "Drone Terdeteksi" if is_drone else "Aman",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
-    print(f"-> Prediksi {node_key} terkirim (id={pred_id}, {label})")
+    print(f"-> Deteksi {node_key} terkirim (id={det_id}, {label})")
 
 # ==============================================================
 # KONFIGURASI DETEKSI ADAPTIF (Z-SCORE)
@@ -74,7 +74,7 @@ STRIDE = 2
 CALIB_SAMPLES = 20
 
 # Aturan Empiris
-# K_FACTOR: Pengali standar deviasi. 3.0 berarti mentoleransi 
+# K_FACTOR: Pengali standar deviasi. 3.0 berarti mentoleransi
 # fluktuasi noise hingga 99.7% dari variansi normal lingkungan.
 K_FACTOR = 3.0
 
@@ -102,15 +102,9 @@ def get_burst_count(bits):
         prev = b
     return count
 
-def hex_to_bits(hex_str):
-    """Binarisasi: kanal dengan nilai hex >= 1 dianggap aktif."""
-    bits = []
-    for char in hex_str:
-        try:
-            bits.append(1 if int(char, 16) >= 1 else 0)
-        except ValueError:
-            bits.append(0)
-    return bits
+def bits_from_payload(data_str):
+    """Ubah string biner '0'/'1' dari node menjadi list int untuk analisis."""
+    return [1 if c == '1' else 0 for c in data_str]
 
 def auto_detect_port():
     ports = serial.tools.list_ports.comports()
@@ -122,15 +116,15 @@ def auto_detect_port():
         return ports[0].device
     return None
 
-def log_csv(node_id, burst_mean, act_mean, base_b, base_a, pred, fase):
+def log_csv(node_id, burst_mean, act_mean, base_b, base_a, hasil, fase):
     if not LOG_CSV:
         return
     try:
         new_file = not os.path.exists(CSV_FILE)
         with open(CSV_FILE, "a", encoding="utf-8") as f:
             if new_file:
-                f.write("timestamp,node,burst_count_mean,active_ch_mean,baseline_burst,baseline_active,prediksi,fase\n")
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{node_id},{burst_mean:.3f},{act_mean:.3f},{base_b:.3f},{base_a:.3f},{pred},{fase}\n")
+                f.write("timestamp,node,burst_count_mean,active_ch_mean,baseline_burst,baseline_active,hasil_deteksi,fase\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{node_id},{burst_mean:.3f},{act_mean:.3f},{base_b:.3f},{base_a:.3f},{hasil},{fase}\n")
     except Exception as e:
         print(f"-> Gagal menulis CSV: {e}")
 
@@ -169,12 +163,12 @@ def read_from_port(ser):
 
                 match = re.search(r'"data_hex"\s*:\s*"([0-9a-fA-F]+)"', line)
                 if match:
-                    hex_str = match.group(1)
-                    node_id = current_node            
-                    node_key = node_id.lower()        
+                    data_str = match.group(1)
+                    node_id = current_node
+                    node_key = node_id.lower()
 
-                    if len(hex_str) == 125:
-                        spectrum_bits = hex_to_bits(hex_str)
+                    if len(data_str) == 125:
+                        spectrum_bits = bits_from_payload(data_str)
 
                         if node_id not in calib_pool:
                             calib_pool[node_id] = []
@@ -182,7 +176,7 @@ def read_from_port(ser):
                             stride_counter[node_id] = 0
 
                         # SINKRON WEB
-                        send_raw_to_firebase(node_key, hex_str, current_ts_wib,
+                        send_raw_to_firebase(node_key, data_str, current_ts_wib,
                                              current_rssi, current_snr)
 
                         frame_burst = get_burst_count(spectrum_bits)
@@ -222,7 +216,7 @@ def read_from_port(ser):
                                     "thr_active": thr_active,
                                 }
                                 fz = frozen[node_id]
-                                
+
                                 print("\n" + "#"*60)
                                 print(f"KALIBRASI {node_id} SELESAI - BASELINE ADAPTIF DIKUNCI")
                                 print(f"Rata-Rata Lingkungan: burst={mean_b:.2f} | active={mean_a:.2f}")
@@ -254,9 +248,8 @@ def read_from_port(ser):
 
                             cond_burst = burst_count_mean >= thr_burst_eff
                             cond_active = active_ch_mean >= thr_active_eff
-                            predicted_as_drone = cond_burst or cond_active
-
-                            status = "DRONE TERDETEKSI !!!" if predicted_as_drone else "AMAN (Tidak ada Drone)"
+                            detected_as_drone = cond_burst or cond_active
+                            status = "DRONE TERDETEKSI !!!" if detected_as_drone else "AMAN (Tidak ada Drone)"
 
                             print("\n" + "="*60)
                             print(f"[{time.strftime('%H:%M:%S')}] ANALISIS TIME-SERIES LOKASI: {node_id}")
@@ -269,10 +262,10 @@ def read_from_port(ser):
 
                             log_csv(node_id, burst_count_mean, active_ch_mean,
                                     fz["baseline_burst"], fz["baseline_active"],
-                                    1 if predicted_as_drone else 0, "deteksi")
+                                    1 if detected_as_drone else 0, "deteksi")
 
                             # SINKRON WEB + ARSIP
-                            send_prediction_to_firebase(node_id, node_key, predicted_as_drone)
+                            send_detection_to_firebase(node_id, node_key, detected_as_drone)
             else:
                 time.sleep(0.01)
         except Exception as e:

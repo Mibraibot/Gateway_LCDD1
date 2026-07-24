@@ -7,7 +7,7 @@ import os
 
 # Konfigurasi jumlah siklus yang ingin direkam
 # 1 siklus = perjalanan dari Node 1 -> Node 2 -> Node 3 -> Node 1 (kembali ke awal)
-TARGET_CYCLES = 500
+TARGET_CYCLES = 300
 
 
 def auto_detect_port():

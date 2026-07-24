@@ -7,70 +7,34 @@
 #include <Wire.h>
 #include <time.h>
 
-// ============================================================================
-// KREDENSIAL WIFI (hanya untuk NTP, TIDAK ada koneksi Firebase di gateway)
-// ============================================================================
-const char *ssid = "ULIN";
-const char *password = "ulinppc245";
+const char *ssid = "LCDD";
+const char *password = "12345688";
 
 // --- KONFIGURASI NTP (WIB = UTC+7) ---
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;
 const int daylightOffset_sec = 0;
 
-// ============================================================================
+
 // >>> KONFIGURASI POLLING NODE <<<
-// ============================================================================
-// MODE SAAT INI: UJI COBA 1 NODE (hanya Node3 yang dipanggil)
-//
-// #############################################################
-// #  CARA MENGAKTIFKAN 3 NODE:                                #
-// #  Cukup ubah SATU baris di bawah ini menjadi:              #
-// #                                                           #
-// #    const uint8_t POLL_NODES[] = {1, 2, 3};                #
-// #                                                           #
-// #  Tidak ada bagian kode lain yang perlu diubah.            #
-// #  Gateway otomatis memutar giliran: 1 -> 2 -> 3 -> 1 ...   #
-// #  (Node yang timeout dilewati, giliran lanjut ke node      #
-// #   berikutnya.)                                            #
-// #############################################################
+
 const uint8_t POLL_NODES[] = {1, 2, 3};
 
 const uint8_t NUM_POLL_NODES = sizeof(POLL_NODES) / sizeof(POLL_NODES[0]);
 
-// Anggaran waktu balasan node (SF7, data_hex tetap 125 karakter '0'/'1'):
-//   airtime poll ~87ms + scan NRF ~330ms + OLED/serial node ~40ms +
-//   airtime balasan 182B ~292ms  =  ~750ms  ->  timeout 1500ms margin ~2x.
-// Node yang mati kini hanya menahan siklus 1,5 dtk (sebelumnya 3 dtk).
+
 const unsigned long POLL_TIMEOUT = 1500;    // ms menunggu balasan node
-// Node kembali siap RX beberapa ms setelah transmit; 100ms sudah cukup
-// aman (sebelumnya 500ms yang membuang 0,4 dtk tiap giliran).
+
 const unsigned long POLL_GAP = 100;         // ms jeda antar giliran poll
 const unsigned long SYNC_INTERVAL = 300000; // broadcast sync ulang tiap 5 menit
 
-// ============================================================================
-// BACKOFF NODE OFFLINE (anti-macet antar node)
-// Tanpa ini, satu node mati (kasus Node1) menahan siklus SETIAP putaran
-// selama POLL_TIMEOUT — node sehat ikut melambat. Dengan backoff: setelah
-// 2x timeout beruntun node ditandai offline dan hanya di-probe tiap 5 dtk;
-// node sehat terus berputar dengan kecepatan penuh. Begitu node offline
-// menjawab probe (dan langsung tersinkron dari "time" di paket poll), ia
-// otomatis kembali masuk rotasi normal.
-// ============================================================================
+
 const uint8_t OFFLINE_AFTER_MISSES = 2;
 const unsigned long OFFLINE_PROBE_MS = 5000;
 
-// Pemulihan mandiri: bila TIDAK ADA SATU PUN balasan selama 30 dtk padahal
-// sedang LISTENING, kemungkinan radio gateway sendiri yang macet — reset +
-// konfigurasi ulang modul LoRa via software (tanpa sentuh kabel/pin).
+
 const unsigned long RADIO_STALL_MS = 30000;
 
-// ============================================================================
-// KONFIGURASI RADIO — HARUS IDENTIK DENGAN NODE!
-// SF7 (sebelumnya SF9): airtime turun ~4x. Dengan RSSI node -35..-47 dBm
-// margin link masih sangat besar. Bila node ditempatkan jauh (RSSI di bawah
-// sekitar -100 dBm), naikkan LORA_SF ke 8 atau 9 DI KEDUA SISI.
-// ============================================================================
 #define LORA_SF 7
 
 // ============================================================================
@@ -183,11 +147,6 @@ void showGatewayInfoScreen() {
   display.display();
 }
 
-// ============================================================================
-// BROADCAST SYNC WAKTU KE SEMUA NODE
-// showScreen=true : tampilkan proses di OLED (untuk boot & tombol manual)
-// showScreen=false: silent (untuk broadcast periodik, layar tak terganggu)
-// ============================================================================
 void broadcastTimeSync(bool showScreen) {
   time_t now = time(nullptr);
   if (now < 1000000000) {
